@@ -93,7 +93,7 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
         from google import genai
         from google.genai import types as gtypes
     except ImportError:
-        await ws.send_json({"type": "error", "message": "google-genai package not installed on server"})
+        await ws.send_json({"type": "error", "message": "google-genai not installed on server"})
         await ws.close()
         return ws
 
