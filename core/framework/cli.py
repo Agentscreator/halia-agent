@@ -64,7 +64,30 @@ def _configure_paths():
             sys.path.insert(0, fa_str)
 
 
+def _load_dotenv() -> None:
+    """Load .env from the project root (if present) before anything else runs."""
+    try:
+        from pathlib import Path as _Path
+        env_file = _Path(__file__).resolve().parent.parent.parent / ".env"
+        if not env_file.is_file():
+            env_file = _Path.cwd() / ".env"
+        if env_file.is_file():
+            import os
+            with env_file.open() as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    os.environ.setdefault(key, value)
+    except Exception:
+        pass
+
+
 def main():
+    _load_dotenv()
     _configure_paths()
 
     parser = argparse.ArgumentParser(
