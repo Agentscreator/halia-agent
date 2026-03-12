@@ -1,0 +1,987 @@
+"""Session-primary lifecycle manager for the HTTP API server.
+
+Sessions (queen) are the primary entity. Workers are optional and can be
+loaded/unloaded while the queen stays alive.
+
+Architecture:
+- Session owns EventBus + LLM, shared with queen and worker
+- Queen is always present once a session starts
+- Worker is optional — loaded into an existing session
+- Judge is active only when a worker is loaded
+"""
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Session:
+    """A live session with a queen and optional worker."""
+
+    id: str
+    event_bus: Any  # EventBus — owned by session
+    llm: Any  # LLMProvider — owned by session
+    loaded_at: float
+    # Queen (always present once started)
+    queen_executor: Any = None  # GraphExecutor for queen input injection
+    queen_task: asyncio.Task | None = None
+    # Worker (optional)
+    worker_id: str | None = None
+    worker_path: Path | None = None
+    runner: Any | None = None  # AgentRunner
+    worker_runtime: Any | None = None  # AgentRuntime
+    worker_info: Any | None = None  # AgentInfo
+    # Queen phase state (building/staging/running)
+    phase_state: Any = None  # QueenPhaseState
+    # Judge (active when worker is loaded)
+    judge_task: asyncio.Task | None = None
+    escalation_sub: str | None = None
+    worker_handoff_sub: str | None = None
+    # Memory consolidation subscription (fires on CONTEXT_COMPACTED)
+    memory_consolidation_sub: str | None = None
+    # Session directory resumption:
+    # When set, _start_queen writes queen conversations to this existing session's
+    # directory instead of creating a new one.  This lets cold-restores accumulate
+    # all messages in the original session folder so history is never fragmented.
+    queen_resume_from: str | None = None
+
+
+class SessionManager:
+    """Manages session lifecycles.
+
+    Thread-safe via asyncio.Lock. Workers are loaded via run_in_executor
+    (blocking I/O) then started on the event loop.
+    """
+
+    def __init__(self, model: str | None = None, credential_store=None) -> None:
+        self._sessions: dict[str, Session] = {}
+        self._loading: set[str] = set()
+        self._model = model
+        self._credential_store = credential_store
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Session lifecycle
+    # ------------------------------------------------------------------
+
+    async def _create_session_core(
+        self,
+        session_id: str | None = None,
+        model: str | None = None,
+    ) -> Session:
+        """Create session infrastructure (EventBus, LLM) without starting queen.
+
+        Internal helper — use create_session() or create_session_with_worker().
+        """
+        from framework.config import RuntimeConfig
+        from framework.llm.litellm import LiteLLMProvider
+        from framework.runtime.event_bus import EventBus
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        resolved_id = session_id or f"session_{ts}_{uuid.uuid4().hex[:8]}"
+
+        async with self._lock:
+            if resolved_id in self._sessions:
+                raise ValueError(f"Session '{resolved_id}' already exists")
+
+        # Load LLM config from ~/.hive/configuration.json
+        rc = RuntimeConfig(model=model or self._model or RuntimeConfig().model)
+
+        # Session owns these — shared with queen and worker
+        llm = LiteLLMProvider(
+            model=rc.model,
+            api_key=rc.api_key,
+            api_base=rc.api_base,
+            **rc.extra_kwargs,
+        )
+        event_bus = EventBus()
+
+        session = Session(
+            id=resolved_id,
+            event_bus=event_bus,
+            llm=llm,
+            loaded_at=time.time(),
+        )
+
+        async with self._lock:
+            self._sessions[resolved_id] = session
+
+        return session
+
+    async def create_session(
+        self,
+        session_id: str | None = None,
+        model: str | None = None,
+        initial_prompt: str | None = None,
+        queen_resume_from: str | None = None,
+    ) -> Session:
+        """Create a new session with a queen but no worker.
+
+        When ``queen_resume_from`` is set the queen writes conversation messages
+        to that existing session's directory instead of creating a new one.
+        This preserves full conversation history across server restarts.
+        """
+        session = await self._create_session_core(session_id=session_id, model=model)
+        session.queen_resume_from = queen_resume_from
+
+        # Start queen immediately (queen-only, no worker tools yet)
+        await self._start_queen(session, worker_identity=None, initial_prompt=initial_prompt)
+
+        logger.info(
+            "Session '%s' created (queen-only, resume_from=%s)",
+            session.id,
+            queen_resume_from,
+        )
+        return session
+
+    async def create_session_with_worker(
+        self,
+        agent_path: str | Path,
+        agent_id: str | None = None,
+        model: str | None = None,
+        initial_prompt: str | None = None,
+        queen_resume_from: str | None = None,
+    ) -> Session:
+        """Create a session and load a worker in one step.
+
+        When ``queen_resume_from`` is set the queen writes conversation messages
+        to that existing session's directory instead of creating a new one.
+        """
+        from framework.tools.queen_lifecycle_tools import build_worker_profile
+
+        agent_path = Path(agent_path)
+        resolved_worker_id = agent_id or agent_path.name
+
+        # Auto-generate session ID (not the agent name)
+        session = await self._create_session_core(model=model)
+        session.queen_resume_from = queen_resume_from
+        try:
+            # Load worker FIRST (before queen) so queen gets full tools
+            await self._load_worker_core(
+                session,
+                agent_path,
+                worker_id=resolved_worker_id,
+                model=model,
+            )
+
+            # Start queen with worker profile + lifecycle + monitoring tools
+            worker_identity = (
+                build_worker_profile(session.worker_runtime, agent_path=agent_path)
+                if session.worker_runtime
+                else None
+            )
+            await self._start_queen(
+                session, worker_identity=worker_identity, initial_prompt=initial_prompt
+            )
+
+        except Exception:
+            # If anything fails, tear down the session
+            await self.stop_session(session.id)
+            raise
+        return session
+
+    # ------------------------------------------------------------------
+    # Worker lifecycle
+    # ------------------------------------------------------------------
+
+    async def _load_worker_core(
+        self,
+        session: Session,
+        agent_path: str | Path,
+        worker_id: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Load a worker agent into a session (core logic).
+
+        Sets up the runner, runtime, and session fields. Does NOT start the
+        judge or notify the queen — callers handle those steps.
+        """
+        from framework.runner import AgentRunner
+
+        agent_path = Path(agent_path)
+        resolved_worker_id = worker_id or agent_path.name
+
+        if session.worker_runtime is not None:
+            raise ValueError(f"Session '{session.id}' already has worker '{session.worker_id}'")
+
+        async with self._lock:
+            if session.id in self._loading:
+                raise ValueError(f"Session '{session.id}' is currently loading a worker")
+            self._loading.add(session.id)
+
+        try:
+            # Blocking I/O — load in executor
+            loop = asyncio.get_running_loop()
+            resolved_model = model or self._model
+            runner = await loop.run_in_executor(
+                None,
+                lambda: AgentRunner.load(
+                    agent_path,
+                    model=resolved_model,
+                    interactive=False,
+                    skip_credential_validation=True,
+                    credential_store=self._credential_store,
+                ),
+            )
+
+            # Setup with session's event bus
+            if runner._agent_runtime is None:
+                await loop.run_in_executor(
+                    None,
+                    lambda: runner._setup(event_bus=session.event_bus),
+                )
+
+            runtime = runner._agent_runtime
+
+            # Start runtime on event loop
+            if runtime and not runtime.is_running:
+                await runtime.start()
+
+            # Clean up stale "active" sessions from previous (dead) processes
+            self._cleanup_stale_active_sessions(agent_path)
+
+            info = runner.info()
+
+            # Update session
+            session.worker_id = resolved_worker_id
+            session.worker_path = agent_path
+            session.runner = runner
+            session.worker_runtime = runtime
+            session.worker_info = info
+
+            async with self._lock:
+                self._loading.discard(session.id)
+
+            logger.info(
+                "Worker '%s' loaded into session '%s'",
+                resolved_worker_id,
+                session.id,
+            )
+
+        except Exception:
+            async with self._lock:
+                self._loading.discard(session.id)
+            raise
+
+    def _cleanup_stale_active_sessions(self, agent_path: Path) -> None:
+        """Mark stale 'active' sessions on disk as 'cancelled'.
+
+        When a new runtime starts, any on-disk session still marked 'active'
+        is from a process that no longer exists. 'Paused' sessions are left
+        intact so they remain resumable.
+
+        Two-layer protection against corrupting live sessions:
+        1. In-memory: skip any session ID currently tracked in self._sessions
+           (guaranteed alive in this process).
+        2. PID validation: if state.json contains a ``pid`` field, check whether
+           that process is still running on the host. If it is, the session is
+           owned by another healthy worker process, so leave it alone.
+        """
+        sessions_path = Path.home() / ".hive" / "agents" / agent_path.name / "sessions"
+        if not sessions_path.exists():
+            return
+
+        live_session_ids = set(self._sessions.keys())
+
+        for d in sessions_path.iterdir():
+            if not d.is_dir() or not d.name.startswith("session_"):
+                continue
+            state_path = d / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                if state.get("status") != "active":
+                    continue
+
+                # Layer 1: skip sessions that are alive in this process
+                session_id = state.get("session_id", d.name)
+                if session_id in live_session_ids or d.name in live_session_ids:
+                    logger.debug(
+                        "Skipping live in-memory session '%s' during stale cleanup",
+                        d.name,
+                    )
+                    continue
+
+                # Layer 2: skip sessions whose owning process is still alive
+                recorded_pid = state.get("pid")
+                if recorded_pid is not None and self._is_pid_alive(recorded_pid):
+                    logger.debug(
+                        "Skipping session '%s' — owning process %d is still running",
+                        d.name,
+                        recorded_pid,
+                    )
+                    continue
+
+                state["status"] = "cancelled"
+                state.setdefault("result", {})["error"] = "Stale session: runtime restarted"
+                state.setdefault("timestamps", {})["updated_at"] = datetime.now().isoformat()
+                state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+                logger.info(
+                    "Marked stale session '%s' as cancelled for agent '%s'", d.name, agent_path.name
+                )
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Failed to clean up stale session %s: %s", d.name, e)
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """Check whether a process with the given PID is still running."""
+        import os
+        import platform
+
+        if platform.system() == "Windows":
+            import ctypes
+
+            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                # 5 is ERROR_ACCESS_DENIED, meaning the process exists but is protected
+                return kernel32.GetLastError() == 5
+
+            exit_code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            # 259 is STILL_ACTIVE
+            return exit_code.value == 259
+        else:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return False
+            return True
+
+    async def load_worker(
+        self,
+        session_id: str,
+        agent_path: str | Path,
+        worker_id: str | None = None,
+        model: str | None = None,
+    ) -> Session:
+        """Load a worker agent into an existing session (with running queen).
+
+        Starts the worker runtime, health judge, and notifies the queen.
+        """
+        agent_path = Path(agent_path)
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise ValueError(f"Session '{session_id}' not found")
+
+        await self._load_worker_core(
+            session,
+            agent_path,
+            worker_id=worker_id,
+            model=model,
+        )
+
+        # Notify queen about the loaded worker (skip for queen itself).
+        # Health judge disabled for simplicity.
+        if agent_path.name != "queen" and session.worker_runtime:
+            # await self._start_judge(session, session.runner._storage_path)
+            await self._notify_queen_worker_loaded(session)
+
+        # Emit SSE event so the frontend can update UI
+        await self._emit_worker_loaded(session)
+
+        return session
+
+    async def unload_worker(self, session_id: str) -> bool:
+        """Unload the worker from a session. Queen stays alive."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        if session.worker_runtime is None:
+            return False
+
+        # Stop judge + escalation
+        self._stop_judge(session)
+
+        # Cleanup worker
+        if session.runner:
+            try:
+                await session.runner.cleanup_async()
+            except Exception as e:
+                logger.error("Error cleaning up worker '%s': %s", session.worker_id, e)
+
+        worker_id = session.worker_id
+        session.worker_id = None
+        session.worker_path = None
+        session.runner = None
+        session.worker_runtime = None
+        session.worker_info = None
+
+        # Notify queen
+        await self._notify_queen_worker_unloaded(session)
+
+        logger.info("Worker '%s' unloaded from session '%s'", worker_id, session_id)
+        return True
+
+    # ------------------------------------------------------------------
+    # Session teardown
+    # ------------------------------------------------------------------
+
+    async def stop_session(self, session_id: str) -> bool:
+        """Stop a session entirely — unload worker + cancel queen."""
+        async with self._lock:
+            session = self._sessions.pop(session_id, None)
+
+        if session is None:
+            return False
+
+        # Capture session data for memory consolidation before teardown
+        _llm = getattr(session, "llm", None)
+        _storage_id = getattr(session, "queen_resume_from", None) or session_id
+        _session_dir = Path.home() / ".hive" / "queen" / "session" / _storage_id
+
+        # Stop judge
+        self._stop_judge(session)
+        if session.worker_handoff_sub is not None:
+            try:
+                session.event_bus.unsubscribe(session.worker_handoff_sub)
+            except Exception:
+                pass
+            session.worker_handoff_sub = None
+
+        # Stop queen and memory consolidation subscription
+        if session.memory_consolidation_sub is not None:
+            try:
+                session.event_bus.unsubscribe(session.memory_consolidation_sub)
+            except Exception:
+                pass
+            session.memory_consolidation_sub = None
+        if session.queen_task is not None:
+            session.queen_task.cancel()
+            session.queen_task = None
+        session.queen_executor = None
+
+        # Cleanup worker
+        if session.runner:
+            try:
+                await session.runner.cleanup_async()
+            except Exception as e:
+                logger.error("Error cleaning up worker: %s", e)
+
+        # Final memory consolidation — fire-and-forget so teardown isn't blocked.
+        if _llm is not None and _session_dir.exists():
+            import asyncio
+
+            from framework.agents.queen.queen_memory import consolidate_queen_memory
+
+            asyncio.create_task(
+                consolidate_queen_memory(session_id, _session_dir, _llm),
+                name=f"queen-memory-consolidation-{session_id}",
+            )
+
+        logger.info("Session '%s' stopped", session_id)
+        return True
+
+    # ------------------------------------------------------------------
+    # Queen startup
+    # ------------------------------------------------------------------
+
+    async def _handle_worker_handoff(self, session: Session, executor: Any, event: Any) -> None:
+        """Route worker escalation events into the queen conversation."""
+        if event.stream_id in ("queen", "judge"):
+            return
+
+        reason = str(event.data.get("reason", "")).strip()
+        context = str(event.data.get("context", "")).strip()
+        node_label = event.node_id or "unknown_node"
+        stream_label = event.stream_id or "unknown_stream"
+
+        handoff = (
+            "[WORKER_ESCALATION_REQUEST]\n"
+            f"stream_id: {stream_label}\n"
+            f"node_id: {node_label}\n"
+            f"reason: {reason or 'unspecified'}\n"
+        )
+        if context:
+            handoff += f"context:\n{context}\n"
+
+        node = executor.node_registry.get("queen")
+        if node is not None and hasattr(node, "inject_event"):
+            await node.inject_event(handoff, is_client_input=False)
+        else:
+            logger.warning("Worker handoff received but queen node not ready")
+
+    def _subscribe_worker_handoffs(self, session: Session, executor: Any) -> None:
+        """Subscribe queen to worker/subagent escalation handoff events."""
+        from framework.runtime.event_bus import EventType as _ET
+
+        if session.worker_handoff_sub is not None:
+            session.event_bus.unsubscribe(session.worker_handoff_sub)
+            session.worker_handoff_sub = None
+
+        async def _on_worker_handoff(event):
+            await self._handle_worker_handoff(session, executor, event)
+
+        session.worker_handoff_sub = session.event_bus.subscribe(
+            event_types=[_ET.ESCALATION_REQUESTED],
+            handler=_on_worker_handoff,
+        )
+
+    async def _start_queen(
+        self,
+        session: Session,
+        worker_identity: str | None,
+        initial_prompt: str | None = None,
+    ) -> None:
+        """Start the queen executor for a session.
+
+        When ``session.queen_resume_from`` is set, queen conversation messages
+        are written to the ORIGINAL session's directory so the full conversation
+        history accumulates in one place across server restarts.
+        """
+        from framework.server.queen_orchestrator import create_queen
+
+        hive_home = Path.home() / ".hive"
+
+        # Determine which session directory to use for queen storage.
+        # When queen_resume_from is set we write to the ORIGINAL session's
+        # directory so that all messages accumulate in one place.
+        storage_session_id = session.queen_resume_from or session.id
+        queen_dir = hive_home / "queen" / "session" / storage_session_id
+        queen_dir.mkdir(parents=True, exist_ok=True)
+
+        # Always write/update session metadata so history sidebar has correct
+        # agent name, path, and last-active timestamp (important so the original
+        # session directory sorts as "most recent" after a cold-restore resume).
+        _meta_path = queen_dir / "meta.json"
+        try:
+            _agent_name = (
+                session.worker_info.name
+                if session.worker_info
+                else (
+                    str(session.worker_path.name).replace("_", " ").title()
+                    if session.worker_path
+                    else None
+                )
+            )
+            _meta_path.write_text(
+                json.dumps(
+                    {
+                        "agent_name": _agent_name,
+                        "agent_path": str(session.worker_path) if session.worker_path else None,
+                        "created_at": time.time(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+        session.queen_task = await create_queen(
+            session=session,
+            session_manager=self,
+            worker_identity=worker_identity,
+            queen_dir=queen_dir,
+            initial_prompt=initial_prompt,
+        )
+
+        # Memory consolidation — triggered by context compaction events.
+        # Compaction is a natural signal that "enough has happened to be worth remembering".
+        _consolidation_llm = session.llm
+        _consolidation_session_dir = queen_dir
+
+        async def _on_compaction(_event) -> None:
+            from framework.agents.queen.queen_memory import consolidate_queen_memory
+
+            await consolidate_queen_memory(
+                session.id, _consolidation_session_dir, _consolidation_llm
+            )
+
+        from framework.runtime.event_bus import EventType as _ET
+
+        session.memory_consolidation_sub = session.event_bus.subscribe(
+            event_types=[_ET.CONTEXT_COMPACTED],
+            handler=_on_compaction,
+        )
+
+    # ------------------------------------------------------------------
+    # Judge startup / teardown
+    # ------------------------------------------------------------------
+
+    async def _start_judge(
+        self,
+        session: Session,
+        worker_storage_path: str | Path,
+    ) -> None:
+        """Start the health judge for a session's worker."""
+        from framework.graph.executor import GraphExecutor
+        from framework.monitoring import judge_goal, judge_graph
+        from framework.runner.tool_registry import ToolRegistry
+        from framework.runtime.core import Runtime
+        from framework.runtime.event_bus import EventType as _ET
+        from framework.tools.worker_monitoring_tools import register_worker_monitoring_tools
+
+        worker_storage_path = Path(worker_storage_path)
+
+        try:
+            # Monitoring tools
+            monitoring_registry = ToolRegistry()
+            register_worker_monitoring_tools(
+                monitoring_registry,
+                session.event_bus,
+                worker_storage_path,
+                worker_graph_id=session.worker_runtime._graph_id,
+            )
+
+            hive_home = Path.home() / ".hive"
+            judge_dir = hive_home / "judge" / "session" / session.id
+            judge_dir.mkdir(parents=True, exist_ok=True)
+
+            judge_runtime = Runtime(hive_home / "judge")
+            monitoring_tools = list(monitoring_registry.get_tools().values())
+            monitoring_executor = monitoring_registry.get_executor()
+
+            async def _judge_loop():
+                interval = 300  # 5 minutes between checks
+                # Wait before the first check — let the worker actually do something
+                await asyncio.sleep(interval)
+                while True:
+                    try:
+                        executor = GraphExecutor(
+                            runtime=judge_runtime,
+                            llm=session.llm,
+                            tools=monitoring_tools,
+                            tool_executor=monitoring_executor,
+                            event_bus=session.event_bus,
+                            stream_id="judge",
+                            storage_path=judge_dir,
+                            loop_config=judge_graph.loop_config,
+                        )
+                        await executor.execute(
+                            graph=judge_graph,
+                            goal=judge_goal,
+                            input_data={
+                                "event": {"source": "timer", "reason": "scheduled"},
+                            },
+                            session_state={"resume_session_id": session.id},
+                        )
+                    except Exception:
+                        logger.error("Health judge tick failed", exc_info=True)
+                    await asyncio.sleep(interval)
+
+            session.judge_task = asyncio.create_task(_judge_loop())
+
+            # Escalation: judge → queen
+            async def _on_escalation(event):
+                ticket = event.data.get("ticket", {})
+                executor = session.queen_executor
+                if executor is None:
+                    logger.warning("Escalation received but queen executor is None")
+                    return
+                node = executor.node_registry.get("queen")
+                if node is not None and hasattr(node, "inject_event"):
+                    msg = "[ESCALATION TICKET from Health Judge]\n" + json.dumps(
+                        ticket, indent=2, ensure_ascii=False
+                    )
+                    await node.inject_event(msg)
+                else:
+                    logger.warning("Escalation received but queen node not ready")
+
+            session.escalation_sub = session.event_bus.subscribe(
+                event_types=[_ET.WORKER_ESCALATION_TICKET],
+                handler=_on_escalation,
+            )
+
+            logger.info("Judge started for session '%s'", session.id)
+
+        except Exception as e:
+            logger.error(
+                "Failed to start judge for session '%s': %s",
+                session.id,
+                e,
+                exc_info=True,
+            )
+
+    def _stop_judge(self, session: Session) -> None:
+        """Cancel judge task and unsubscribe escalation events."""
+        if session.judge_task is not None:
+            session.judge_task.cancel()
+            session.judge_task = None
+        if session.escalation_sub is not None:
+            try:
+                session.event_bus.unsubscribe(session.escalation_sub)
+            except Exception:
+                pass
+            session.escalation_sub = None
+
+    # ------------------------------------------------------------------
+    # Queen notifications
+    # ------------------------------------------------------------------
+
+    async def _notify_queen_worker_loaded(self, session: Session) -> None:
+        """Inject a system message into the queen about the loaded worker."""
+        from framework.tools.queen_lifecycle_tools import build_worker_profile
+
+        executor = session.queen_executor
+        if executor is None:
+            return
+        node = executor.node_registry.get("queen")
+        if node is None or not hasattr(node, "inject_event"):
+            return
+
+        profile = build_worker_profile(session.worker_runtime, agent_path=session.worker_path)
+        await node.inject_event(f"[SYSTEM] Worker loaded.{profile}")
+
+    async def _emit_worker_loaded(self, session: Session) -> None:
+        """Publish a WORKER_LOADED event so the frontend can update."""
+        from framework.runtime.event_bus import AgentEvent, EventType
+
+        info = session.worker_info
+        await session.event_bus.publish(
+            AgentEvent(
+                type=EventType.WORKER_LOADED,
+                stream_id="queen",
+                data={
+                    "worker_id": session.worker_id,
+                    "worker_name": info.name if info else session.worker_id,
+                    "agent_path": str(session.worker_path) if session.worker_path else "",
+                    "goal": info.goal_name if info else "",
+                    "node_count": info.node_count if info else 0,
+                },
+            )
+        )
+
+    async def _notify_queen_worker_unloaded(self, session: Session) -> None:
+        """Notify the queen that the worker has been unloaded."""
+        executor = session.queen_executor
+        if executor is None:
+            return
+        node = executor.node_registry.get("queen")
+        if node is None or not hasattr(node, "inject_event"):
+            return
+
+        await node.inject_event(
+            "[SYSTEM] Worker unloaded. You are now operating independently. "
+            "Handle all tasks directly using your coding tools."
+        )
+
+    async def revive_queen(self, session: Session, initial_prompt: str | None = None) -> None:
+        """Revive a dead queen executor on an existing session.
+
+        Restarts the queen with the same session context (worker profile, tools, etc.).
+        """
+        from framework.tools.queen_lifecycle_tools import build_worker_profile
+
+        # Build worker identity if worker is loaded
+        worker_identity = (
+            build_worker_profile(session.worker_runtime, agent_path=session.worker_path)
+            if session.worker_runtime
+            else None
+        )
+
+        # Start queen with existing session context
+        await self._start_queen(
+            session, worker_identity=worker_identity, initial_prompt=initial_prompt
+        )
+
+        logger.info("Queen revived for session '%s'", session.id)
+
+    # ------------------------------------------------------------------
+    # Lookups
+    # ------------------------------------------------------------------
+
+    def get_session(self, session_id: str) -> Session | None:
+        return self._sessions.get(session_id)
+
+    def get_session_by_worker_id(self, worker_id: str) -> Session | None:
+        """Find a session by its loaded worker's ID."""
+        for s in self._sessions.values():
+            if s.worker_id == worker_id:
+                return s
+        return None
+
+    def get_session_for_agent(self, agent_id: str) -> Session | None:
+        """Resolve an agent_id to a session (backward compat).
+
+        Checks session.id first, then session.worker_id.
+        """
+        s = self._sessions.get(agent_id)
+        if s:
+            return s
+        return self.get_session_by_worker_id(agent_id)
+
+    def is_loading(self, session_id: str) -> bool:
+        return session_id in self._loading
+
+    def list_sessions(self) -> list[Session]:
+        return list(self._sessions.values())
+
+    # ------------------------------------------------------------------
+    # Cold session helpers (disk-only, no live runtime required)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_cold_session_info(session_id: str) -> dict | None:
+        """Return disk metadata for a session that is no longer live in memory.
+
+        Checks whether queen conversation files exist at
+        ~/.hive/queen/session/{session_id}/conversations/.  Returns None when
+        no data is found so callers can fall through to a 404.
+        """
+        queen_dir = Path.home() / ".hive" / "queen" / "session" / session_id
+        convs_dir = queen_dir / "conversations"
+        if not convs_dir.exists():
+            return None
+
+        # Check whether any message part files are actually present
+        has_messages = False
+        try:
+            for node_dir in convs_dir.iterdir():
+                if not node_dir.is_dir():
+                    continue
+                parts_dir = node_dir / "parts"
+                if parts_dir.exists() and any(f.suffix == ".json" for f in parts_dir.iterdir()):
+                    has_messages = True
+                    break
+        except OSError:
+            pass
+
+        try:
+            created_at = queen_dir.stat().st_ctime
+        except OSError:
+            created_at = 0.0
+
+        # Read extra metadata written at session start
+        agent_name: str | None = None
+        agent_path: str | None = None
+        meta_path = queen_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                agent_name = meta.get("agent_name")
+                agent_path = meta.get("agent_path")
+                created_at = meta.get("created_at") or created_at
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        return {
+            "session_id": session_id,
+            "cold": True,
+            "live": False,
+            "has_messages": has_messages,
+            "created_at": created_at,
+            "agent_name": agent_name,
+            "agent_path": agent_path,
+        }
+
+    @staticmethod
+    def list_cold_sessions() -> list[dict]:
+        """Return metadata for every queen session directory on disk, newest first."""
+        queen_sessions_dir = Path.home() / ".hive" / "queen" / "session"
+        if not queen_sessions_dir.exists():
+            return []
+
+        results: list[dict] = []
+        try:
+            entries = sorted(
+                queen_sessions_dir.iterdir(),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return []
+
+        for d in entries:
+            if not d.is_dir():
+                continue
+            try:
+                created_at = d.stat().st_ctime
+            except OSError:
+                created_at = 0.0
+            agent_name: str | None = None
+            agent_path: str | None = None
+            meta_path = d / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    agent_name = meta.get("agent_name")
+                    agent_path = meta.get("agent_path")
+                    created_at = meta.get("created_at") or created_at
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Build a quick preview of the last human/assistant exchange.
+            # We read all conversation parts, filter to client-facing messages,
+            # and return the last assistant message content as a snippet.
+            last_message: str | None = None
+            message_count: int = 0
+            convs_dir = d / "conversations"
+            if convs_dir.exists():
+                try:
+                    all_parts: list[dict] = []
+                    for node_dir in convs_dir.iterdir():
+                        if not node_dir.is_dir():
+                            continue
+                        parts_dir = node_dir / "parts"
+                        if not parts_dir.exists():
+                            continue
+                        for part_file in sorted(parts_dir.iterdir()):
+                            if part_file.suffix != ".json":
+                                continue
+                            try:
+                                part = json.loads(part_file.read_text(encoding="utf-8"))
+                                part.setdefault("created_at", part_file.stat().st_mtime)
+                                all_parts.append(part)
+                            except (json.JSONDecodeError, OSError):
+                                continue
+                    # Filter to client-facing messages only
+                    client_msgs = [
+                        p
+                        for p in all_parts
+                        if not p.get("is_transition_marker")
+                        and p.get("role") != "tool"
+                        and not (p.get("role") == "assistant" and p.get("tool_calls"))
+                    ]
+                    client_msgs.sort(key=lambda m: m.get("created_at", m.get("seq", 0)))
+                    message_count = len(client_msgs)
+                    # Last assistant message as preview snippet
+                    for msg in reversed(client_msgs):
+                        content = msg.get("content") or ""
+                        if isinstance(content, list):
+                            # Anthropic-style content blocks
+                            content = " ".join(
+                                b.get("text", "")
+                                for b in content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        if content and msg.get("role") == "assistant":
+                            last_message = content[:120].strip()
+                            break
+                except OSError:
+                    pass
+
+            results.append(
+                {
+                    "session_id": d.name,
+                    "cold": True,  # caller overrides for live sessions
+                    "live": False,
+                    "has_messages": convs_dir.exists() and message_count > 0,
+                    "created_at": created_at,
+                    "agent_name": agent_name,
+                    "agent_path": agent_path,
+                    "last_message": last_message,
+                    "message_count": message_count,
+                }
+            )
+
+        return results
+
+    async def shutdown_all(self) -> None:
+        """Gracefully stop all sessions. Called on server shutdown."""
+        session_ids = list(self._sessions.keys())
+        for sid in session_ids:
+            await self.stop_session(sid)
+        logger.info("All sessions stopped")
