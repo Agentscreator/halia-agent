@@ -34,7 +34,7 @@ export type HistorySession = {
   message_count?: number;
 };
 
-const LABEL_STORE_KEY = "hive:history-labels";
+const LABEL_STORE_KEY = "halia:history-labels";
 
 function loadLabelStore(): Record<string, string> {
   try {
