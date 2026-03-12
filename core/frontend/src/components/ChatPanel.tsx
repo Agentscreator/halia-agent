@@ -1,7 +1,9 @@
-import { memo, useState, useRef, useEffect } from "react";
+import { memo, useState, useRef, useEffect, useCallback } from "react";
 import { Send, Square, Crown, Cpu, Check, Loader2 } from "lucide-react";
 import MarkdownContent from "@/components/MarkdownContent";
 import QuestionWidget from "@/components/QuestionWidget";
+import VoiceButton from "@/components/VoiceButton";
+import { useVoice } from "@/hooks/use-voice";
 
 export interface ChatMessage {
   id: string;
@@ -40,6 +42,8 @@ interface ChatPanelProps {
   onQuestionDismiss?: () => void;
   /** Queen operating phase — shown as a tag on queen messages */
   queenPhase?: "planning" | "building" | "staging" | "running";
+  /** Backend session ID — enables the voice button when provided */
+  sessionId?: string;
 }
 
 const queenColor = "hsl(45,95%,58%)";
@@ -222,18 +226,55 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
   );
 }, (prev, next) => prev.msg.id === next.msg.id && prev.msg.content === next.msg.content && prev.queenPhase === next.queenPhase);
 
-export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase }: ChatPanelProps) {
+export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase, sessionId }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
+  const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const threadMessages = messages.filter((m) => {
-    if (m.type === "system" && !m.thread) return false;
-    return m.thread === activeThread;
+  // Voice integration — only active when a sessionId is provided
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
+    const msg: ChatMessage = {
+      id: `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      agent: role === "user" ? "You" : "Halia",
+      agentColor: role === "user" ? "hsl(220,60%,55%)" : "hsl(45,95%,58%)",
+      content: text,
+      timestamp: new Date().toISOString(),
+      type: role === "user" ? "user" : "agent",
+      role: role === "assistant" ? "queen" : undefined,
+      thread: activeThread,
+      createdAt: Date.now(),
+    };
+    setVoiceMessages((prev) => [...prev, msg]);
+    // Also inject user speech into the text pipeline so the agent stays in context
+    if (role === "user") onSend(text, activeThread);
+  }, [activeThread, onSend]);
+
+  const handleVoiceError = useCallback((message: string) => {
+    console.warn("[Voice]", message);
+  }, []);
+
+  const { state: voiceState, start: startVoice, stop: stopVoice } = useVoice({
+    sessionId: sessionId ?? "",
+    onTranscript: handleVoiceTranscript,
+    onError: handleVoiceError,
   });
+
+  // Clear voice messages when switching threads
+  useEffect(() => {
+    setVoiceMessages([]);
+  }, [activeThread]);
+
+  const threadMessages = [
+    ...messages.filter((m) => {
+      if (m.type === "system" && !m.thread) return false;
+      return m.thread === activeThread;
+    }),
+    ...voiceMessages,
+  ].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   // Mark current thread as read
   useEffect(() => {
@@ -341,7 +382,30 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
         />
       ) : (
         <form onSubmit={handleSubmit} className="p-4">
-          <div className="flex items-center gap-3 bg-muted/40 rounded-xl px-4 py-2.5 border border-border focus-within:border-primary/40 transition-colors">
+          {/* Voice status banner */}
+          {(voiceState === "listening" || voiceState === "speaking") && (
+            <div className={[
+              "mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
+              voiceState === "listening"
+                ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                : "bg-primary/10 text-primary border border-primary/20",
+            ].join(" ")}>
+              <span className={[
+                "inline-block w-1.5 h-1.5 rounded-full",
+                voiceState === "listening" ? "bg-red-400 animate-pulse" : "bg-primary animate-pulse",
+              ].join(" ")} />
+              {voiceState === "listening" ? "Listening… speak now" : "Halia is speaking…"}
+            </div>
+          )}
+
+          <div className={[
+            "flex items-center gap-3 bg-muted/40 rounded-xl px-4 py-2.5 border transition-colors",
+            voiceState === "listening"
+              ? "border-red-500/40"
+              : voiceState === "speaking"
+              ? "border-primary/40"
+              : "border-border focus-within:border-primary/40",
+          ].join(" ")}>
             <textarea
               ref={textareaRef}
               rows={1}
@@ -358,10 +422,29 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
                   handleSubmit(e);
                 }
               }}
-              placeholder={disabled ? "Connecting to agent..." : "Message Queen Bee..."}
+              placeholder={
+                voiceState === "listening"
+                  ? "Listening… or type here"
+                  : voiceState === "speaking"
+                  ? "Halia is speaking…"
+                  : disabled
+                  ? "Connecting to agent..."
+                  : "Message Halia… or click the mic"
+              }
               disabled={disabled}
               className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed resize-none overflow-y-auto"
             />
+
+            {/* Voice button — only shown when a session is active */}
+            {sessionId && (
+              <VoiceButton
+                state={voiceState}
+                onStart={startVoice}
+                onStop={stopVoice}
+                disabled={disabled}
+              />
+            )}
+
             {isBusy && onCancel ? (
               <button
                 type="button"

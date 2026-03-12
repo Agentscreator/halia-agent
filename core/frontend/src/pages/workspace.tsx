@@ -2460,6 +2460,7 @@ export default function Workspace() {
                     : handleWorkerQuestionAnswer
                 }
                 onQuestionDismiss={handleQuestionDismiss}
+                sessionId={activeSession.backendSessionId}
               />
             )}
           </div>
