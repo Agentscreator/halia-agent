@@ -1,9 +1,10 @@
 import { memo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Crown, Cpu, Check, Loader2 } from "lucide-react";
+import { Send, Square, Crown, Cpu, Check, Loader2, Volume2 } from "lucide-react";
 import MarkdownContent from "@/components/MarkdownContent";
 import QuestionWidget from "@/components/QuestionWidget";
 import VoiceButton from "@/components/VoiceButton";
 import { useVoice } from "@/hooks/use-voice";
+import { useTTS } from "@/hooks/use-tts";
 
 export interface ChatMessage {
   id: string;
@@ -281,6 +282,59 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     }
   }, [autoStartVoice, sessionId, voiceState, disabled, startVoice]);
 
+  // --- Voice mode: when active, all assistant text messages are read aloud ---
+  const [voiceMode, setVoiceMode] = useState(false);
+  const { speak, cancel: cancelTTS, speaking: ttsSpeaking } = useTTS();
+  // Track which message IDs we've already sent to TTS to avoid duplicates
+  const spokenIdsRef = useRef(new Set<string>());
+
+  // Enter voice mode automatically when voice recording starts
+  useEffect(() => {
+    if (voiceState === "listening" || voiceState === "speaking") {
+      setVoiceMode(true);
+    }
+  }, [voiceState]);
+
+  // Also enter voice mode if autoStartVoice was requested
+  useEffect(() => {
+    if (autoStartVoice) setVoiceMode(true);
+  }, [autoStartVoice]);
+
+  // When voice mode is on, speak new assistant messages via TTS.
+  // We watch the messages prop (text pipeline) — voice transcript messages
+  // from the Gemini Live WebSocket already have audio, so skip those.
+  const prevMessageCountRef = useRef(messages.length);
+  useEffect(() => {
+    if (!voiceMode) {
+      prevMessageCountRef.current = messages.length;
+      return;
+    }
+
+    // Only look at messages added since last render
+    const newMessages = messages.slice(prevMessageCountRef.current);
+    prevMessageCountRef.current = messages.length;
+
+    for (const msg of newMessages) {
+      // Only speak assistant/queen/worker messages, not user or system
+      if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
+      if (!msg.content?.trim()) continue;
+      // Skip if already spoken
+      if (spokenIdsRef.current.has(msg.id)) continue;
+      spokenIdsRef.current.add(msg.id);
+      speak(msg.content);
+    }
+  }, [messages, voiceMode, speak]);
+
+  // Turn off voice mode handler
+  const handleVoiceModeOff = useCallback(() => {
+    setVoiceMode(false);
+    cancelTTS();
+    // Also stop live voice if active
+    if (voiceState === "listening" || voiceState === "speaking") {
+      stopVoice();
+    }
+  }, [cancelTTS, voiceState, stopVoice]);
+
   const threadMessages = [
     ...messages.filter((m) => {
       if (m.type === "system" && !m.thread) return false;
@@ -395,6 +449,23 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
         />
       ) : (
         <form onSubmit={handleSubmit} className="p-4">
+          {/* Voice mode banner — shows when voice mode is active with option to turn off */}
+          {voiceMode && voiceState !== "listening" && voiceState !== "speaking" && !voiceError && (
+            <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <Volume2 className="w-3 h-3" />
+              <span className="flex-1">
+                {ttsSpeaking ? "Speaking…" : "Voice mode on — responses will be read aloud"}
+              </span>
+              <button
+                type="button"
+                onClick={handleVoiceModeOff}
+                className="ml-auto px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 transition-colors"
+              >
+                Turn off
+              </button>
+            </div>
+          )}
+
           {/* Voice status / error banner */}
           {voiceError ? (
             <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-destructive/10 text-destructive border border-destructive/20">
