@@ -6,6 +6,8 @@ interface VoiceButtonProps {
   onStart: () => void;
   onStop: () => void;
   disabled?: boolean;
+  /** When true the session hasn't started yet — show a waiting tooltip. */
+  noSession?: boolean;
 }
 
 const LABELS: Record<VoiceState, string> = {
@@ -16,7 +18,7 @@ const LABELS: Record<VoiceState, string> = {
   error: "Voice error — try again",
 };
 
-export default function VoiceButton({ state, onStart, onStop, disabled }: VoiceButtonProps) {
+export default function VoiceButton({ state, onStart, onStop, disabled, noSession }: VoiceButtonProps) {
   const isActive = state === "listening" || state === "speaking";
 
   const handleClick = () => {
@@ -29,8 +31,8 @@ export default function VoiceButton({ state, onStart, onStop, disabled }: VoiceB
       type="button"
       onClick={handleClick}
       disabled={disabled || state === "connecting" || state === "error"}
-      title={LABELS[state]}
-      aria-label={LABELS[state]}
+      title={noSession ? "Start a conversation to enable voice" : LABELS[state]}
+      aria-label={noSession ? "Voice unavailable — start a conversation first" : LABELS[state]}
       className={[
         "relative p-2 rounded-lg transition-all duration-200",
         state === "listening"

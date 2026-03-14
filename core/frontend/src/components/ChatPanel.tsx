@@ -229,6 +229,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -254,6 +255,8 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
+    setVoiceError(message);
+    setTimeout(() => setVoiceError(null), 6000);
   }, []);
 
   const { state: voiceState, start: startVoice, stop: stopVoice } = useVoice({
@@ -381,8 +384,13 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
         />
       ) : (
         <form onSubmit={handleSubmit} className="p-4">
-          {/* Voice status banner */}
-          {(voiceState === "listening" || voiceState === "speaking") && (
+          {/* Voice status / error banner */}
+          {voiceError ? (
+            <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-destructive/10 text-destructive border border-destructive/20">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
+              {voiceError}
+            </div>
+          ) : (voiceState === "listening" || voiceState === "speaking") && (
             <div className={[
               "mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
               voiceState === "listening"
@@ -434,15 +442,14 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
               className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed resize-none overflow-y-auto"
             />
 
-            {/* Voice button — only shown when a session is active */}
-            {sessionId && (
-              <VoiceButton
-                state={voiceState}
-                onStart={startVoice}
-                onStop={stopVoice}
-                disabled={disabled}
-              />
-            )}
+            {/* Voice button — always visible; disabled until a session is active */}
+            <VoiceButton
+              state={voiceState}
+              onStart={startVoice}
+              onStop={stopVoice}
+              disabled={disabled || !sessionId}
+              noSession={!sessionId}
+            />
 
             {isBusy && onCancel ? (
               <button
