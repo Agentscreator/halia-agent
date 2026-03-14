@@ -159,8 +159,7 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
         const source = captureCtx.createMediaStreamSource(stream);
 
-        // ScriptProcessorNode: 512 samples ≈ 32 ms chunks at 16 kHz
-        // @ts-expect-error — deprecated but universally supported
+        // ScriptProcessorNode: 512 samples ≈ 32 ms chunks at 16 kHz — deprecated but universally supported
         const processor: ScriptProcessorNode = captureCtx.createScriptProcessor(512, 1, 1);
         processorRef.current = processor;
 
