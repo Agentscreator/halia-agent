@@ -82,10 +82,12 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
 
     api_key = _get_api_key(request)
     if not api_key:
-        await ws.send_json({
-            "type": "error",
-            "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
-        })
+        await ws.send_json(
+            {
+                "type": "error",
+                "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
+            }
+        )
         await ws.close()
         return ws
 
@@ -141,16 +143,20 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                         break
                     if response.data:
                         # PCM int16 24kHz mono — send as base64
-                        await ws.send_json({
-                            "type": "audio_chunk",
-                            "data": base64.b64encode(response.data).decode(),
-                        })
+                        await ws.send_json(
+                            {
+                                "type": "audio_chunk",
+                                "data": base64.b64encode(response.data).decode(),
+                            }
+                        )
                     if response.text:
-                        await ws.send_json({
-                            "type": "transcript",
-                            "text": response.text,
-                            "role": "assistant",
-                        })
+                        await ws.send_json(
+                            {
+                                "type": "transcript",
+                                "text": response.text,
+                                "role": "assistant",
+                            }
+                        )
                         await _inject_to_queen(session, response.text)
 
             browser_task = asyncio.ensure_future(browser_to_gemini())

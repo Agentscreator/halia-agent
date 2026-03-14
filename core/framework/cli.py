@@ -68,11 +68,13 @@ def _load_dotenv() -> None:
     """Load .env from the project root (if present) before anything else runs."""
     try:
         from pathlib import Path as _Path
+
         env_file = _Path(__file__).resolve().parent.parent.parent / ".env"
         if not env_file.is_file():
             env_file = _Path.cwd() / ".env"
         if env_file.is_file():
             import os
+
             with env_file.open() as fh:
                 for line in fh:
                     line = line.strip()
