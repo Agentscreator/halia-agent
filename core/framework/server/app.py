@@ -218,8 +218,8 @@ def create_app(model: str | None = None) -> web.Application:
     from framework.server.routes_graphs import register_routes as register_graph_routes
     from framework.server.routes_logs import register_routes as register_log_routes
     from framework.server.routes_sessions import register_routes as register_session_routes
-    from framework.server.routes_voice import register_routes as register_voice_routes
     from framework.server.routes_tts import register_routes as register_tts_routes
+    from framework.server.routes_voice import register_routes as register_voice_routes
 
     register_credential_routes(app)
     register_execution_routes(app)
