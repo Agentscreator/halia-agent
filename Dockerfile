@@ -22,11 +22,11 @@ WORKDIR /app
 
 # Copy project files needed for dependency resolution
 COPY pyproject.toml uv.lock ./
-COPY core/pyproject.toml core/uv.lock* core/
+COPY core/pyproject.toml core/uv.lock* core/README.md core/
 COPY tools/ tools/
 
 # Install Python dependencies
-RUN uv sync --project core --no-dev --frozen
+RUN uv sync --project core --no-dev --frozen --no-editable
 
 # Copy framework source
 COPY core/framework/ core/framework/

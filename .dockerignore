@@ -5,6 +5,7 @@
 
 # Documentation (not needed at runtime)
 *.md
+!core/README.md
 docs/
 LICENSE
 CHANGELOG.md
