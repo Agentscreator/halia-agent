@@ -89,30 +89,30 @@ const MARGIN_RIGHT = 50; // space for back-edge arcs
 const SVG_BASE_W = 320;
 const GAP_X = 12;
 
-// Unified amber/gold palette
+// Blue palette
 const statusColors: Record<NodeStatus, { dot: string; bg: string; border: string; glow: string }> = {
   running: {
-    dot: "hsl(45,95%,58%)",
-    bg: "hsl(45,95%,58%,0.08)",
-    border: "hsl(45,95%,58%,0.5)",
-    glow: "hsl(45,95%,58%,0.15)",
+    dot: "hsl(210,85%,55%)",
+    bg: "hsl(210,85%,55%,0.08)",
+    border: "hsl(210,85%,55%,0.5)",
+    glow: "hsl(210,85%,55%,0.15)",
   },
   looping: {
-    dot: "hsl(38,90%,55%)",
-    bg: "hsl(38,90%,55%,0.08)",
-    border: "hsl(38,90%,55%,0.5)",
-    glow: "hsl(38,90%,55%,0.15)",
+    dot: "hsl(200,80%,52%)",
+    bg: "hsl(200,80%,52%,0.08)",
+    border: "hsl(200,80%,52%,0.5)",
+    glow: "hsl(200,80%,52%,0.15)",
   },
   complete: {
-    dot: "hsl(43,70%,45%)",
-    bg: "hsl(43,70%,45%,0.05)",
-    border: "hsl(43,70%,45%,0.25)",
+    dot: "hsl(210,55%,50%)",
+    bg: "hsl(210,55%,50%,0.05)",
+    border: "hsl(210,55%,50%,0.25)",
     glow: "none",
   },
   pending: {
-    dot: "hsl(35,15%,28%)",
-    bg: "hsl(35,10%,12%)",
-    border: "hsl(35,10%,20%)",
+    dot: "hsl(215,20%,40%)",
+    bg: "hsl(215,15%,15%)",
+    border: "hsl(215,15%,22%)",
     glow: "none",
   },
   error: {
@@ -354,8 +354,8 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
 
     const fromNode = nodes[edge.fromIdx];
     const isActive = fromNode.status === "complete" || fromNode.status === "running" || fromNode.status === "looping";
-    const strokeColor = isActive ? "hsl(43,70%,45%,0.35)" : "hsl(35,10%,20%)";
-    const arrowColor = isActive ? "hsl(43,70%,45%,0.5)" : "hsl(35,10%,22%)";
+    const strokeColor = isActive ? "hsl(210,55%,55%,0.35)" : "hsl(215,15%,22%)";
+    const arrowColor = isActive ? "hsl(210,55%,55%,0.5)" : "hsl(215,15%,24%)";
 
     return (
       <g key={`fwd-${i}`}>
@@ -368,7 +368,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
           <text
             x={(startX + toCenterX) / 2 + 8}
             y={midY - 2}
-            fill="hsl(35,15%,40%)"
+            fill="hsl(215,20%,55%)"
             fontSize={9}
             fontStyle="italic"
           >
@@ -394,7 +394,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
 
     const fromNode = nodes[edge.fromIdx];
     const isActive = fromNode.status === "complete" || fromNode.status === "running" || fromNode.status === "looping";
-    const color = isActive ? "hsl(38,80%,50%,0.3)" : "hsl(35,10%,20%)";
+    const color = isActive ? "hsl(210,75%,55%,0.3)" : "hsl(215,15%,22%)";
 
     // Bezier curve with rounded corners
     const path = `M ${startX} ${startY} C ${startX + r} ${startY}, ${curveX} ${startY}, ${curveX} ${startY - r} L ${curveX} ${endY + r} C ${curveX} ${endY}, ${endX + r} ${endY}, ${endX + 6} ${endY}`;
@@ -404,7 +404,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
         <path d={path} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="4 3" />
         <polygon
           points={`${endX + 6},${endY - 3} ${endX + 6},${endY + 3} ${endX},${endY}`}
-          fill={isActive ? "hsl(38,80%,50%,0.45)" : "hsl(35,10%,22%)"}
+          fill={isActive ? "hsl(210,75%,55%,0.45)" : "hsl(215,15%,24%)"}
         />
       </g>
     );
@@ -468,7 +468,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
         {countdownLabel && (
           <text
             x={pos.x + nodeW / 2} y={pos.y + NODE_H + 13}
-            fill="hsl(210,30%,50%)" fontSize={9.5}
+            fill="hsl(210,45%,55%)" fontSize={9.5}
             textAnchor="middle" fontStyle="italic" opacity={0.7}
           >
             {countdownLabel}
@@ -543,7 +543,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
         {/* Label -- truncated with ellipsis for narrow nodes */}
         <text
           x={pos.x + 32} y={pos.y + NODE_H / 2}
-          fill={isActive ? "hsl(45,90%,85%)" : isDone ? "hsl(40,20%,75%)" : "hsl(35,10%,45%)"}
+          fill={isActive ? "hsl(210,90%,92%)" : isDone ? "hsl(210,25%,72%)" : "hsl(215,15%,52%)"}
           fontSize={fontSize}
           fontWeight={isActive ? 600 : isDone ? 500 : 400}
           dominantBaseline="middle"
@@ -556,7 +556,7 @@ export default function AgentGraph({ nodes, title: _title, onNodeClick, onRun, o
         {node.statusLabel && isActive && (
           <text
             x={pos.x + nodeW + 10} y={pos.y + NODE_H / 2}
-            fill="hsl(45,80%,60%)" fontSize={10.5} fontStyle="italic"
+            fill="hsl(210,80%,68%)" fontSize={10.5} fontStyle="italic"
             dominantBaseline="middle" opacity={0.8}
           >
             {node.statusLabel}

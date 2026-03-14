@@ -46,25 +46,24 @@ interface ChatPanelProps {
   sessionId?: string;
 }
 
-const queenColor = "hsl(45,95%,58%)";
-const workerColor = "hsl(220,60%,55%)";
+const queenColor = "hsl(210,85%,55%)";
+const workerColor = "hsl(200,70%,50%)";
 
 function getColor(_agent: string, role?: "queen" | "worker"): string {
   if (role === "queen") return queenColor;
   return workerColor;
 }
 
-// Honey-drizzle palette — based on color-hex.com/color-palette/80116
-// #8e4200 · #db6f02 · #ff9624 · #ffb825 · #ffd69c + adjacent warm tones
+// Blue-ocean palette — sky blues, cyans, teals, and indigo accents
 const TOOL_HEX = [
-  "#db6f02", // rich orange
-  "#ffb825", // golden yellow
-  "#ff9624", // bright orange
-  "#c48820", // warm bronze
-  "#e89530", // honey
-  "#d4a040", // goldenrod
-  "#cc7a10", // caramel
-  "#e5a820", // sunflower
+  "#2d8ff0", // sky blue
+  "#0ea5e9", // light blue
+  "#38bdf8", // pale blue
+  "#06b6d4", // cyan
+  "#14b8a6", // teal
+  "#3b82f6", // blue
+  "#6366f1", // indigo
+  "#8b5cf6", // violet-blue
 ];
 
 function toolHex(name: string): string {
@@ -240,7 +239,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     const msg: ChatMessage = {
       id: `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       agent: role === "user" ? "You" : "Halia",
-      agentColor: role === "user" ? "hsl(220,60%,55%)" : "hsl(45,95%,58%)",
+      agentColor: role === "user" ? "hsl(200,70%,50%)" : "hsl(210,85%,55%)",
       content: text,
       timestamp: new Date().toISOString(),
       type: role === "user" ? "user" : "agent",
