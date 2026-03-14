@@ -1,0 +1,43 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: halia
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Allow WebSocket connections (voice) to stay open up to 15 min
+        run.googleapis.com/sessionAffinity: "true"
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 900
+      containers:
+        - image: IMAGE_URL
+          ports:
+            - containerPort: 8787
+          env:
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: google-api-key
+                  key: latest
+          resources:
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8787
+            periodSeconds: 30
