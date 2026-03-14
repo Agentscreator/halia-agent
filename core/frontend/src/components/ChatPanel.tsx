@@ -44,6 +44,8 @@ interface ChatPanelProps {
   queenPhase?: "planning" | "building" | "staging" | "running";
   /** Backend session ID — enables the voice button when provided */
   sessionId?: string;
+  /** When true, auto-start voice on mount (e.g. navigated from home page mic) */
+  autoStartVoice?: boolean;
 }
 
 const queenColor = "hsl(210,85%,55%)";
@@ -225,7 +227,7 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
   );
 }, (prev, next) => prev.msg.id === next.msg.id && prev.msg.content === next.msg.content && prev.queenPhase === next.queenPhase);
 
-export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase, sessionId }: ChatPanelProps) {
+export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase, sessionId, autoStartVoice }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
@@ -269,6 +271,15 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   useEffect(() => {
     setVoiceMessages([]);
   }, [activeThread]);
+
+  // Auto-start voice when navigated from home page mic button
+  const autoStartFired = useRef(false);
+  useEffect(() => {
+    if (autoStartVoice && sessionId && voiceState === "idle" && !disabled && !autoStartFired.current) {
+      autoStartFired.current = true;
+      startVoice();
+    }
+  }, [autoStartVoice, sessionId, voiceState, disabled, startVoice]);
 
   const threadMessages = [
     ...messages.filter((m) => {

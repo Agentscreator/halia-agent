@@ -318,6 +318,8 @@ export default function Workspace() {
   // ?session= param: when navigating from the home history sidebar, this
   // carries the backendSessionId to open as a tab on mount.
   const initialSessionId = searchParams.get("session") || "";
+  // ?voice=true: auto-start voice after navigating from home page mic button
+  const initialVoice = searchParams.get("voice") === "true";
 
   // When submitting a new prompt from home for "new-agent", use a unique key
   // so each prompt gets its own tab instead of overwriting the previous one.
@@ -2461,6 +2463,7 @@ export default function Workspace() {
                 }
                 onQuestionDismiss={handleQuestionDismiss}
                 sessionId={activeSession.backendSessionId}
+                autoStartVoice={initialVoice}
               />
             )}
           </div>

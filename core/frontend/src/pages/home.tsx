@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon, Send, Bot, Radar, Reply, DollarSign, MapPin, Calendar, UserPlus, Twitter } from "lucide-react";
+import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon, Send, Bot, Radar, Reply, DollarSign, MapPin, Calendar, UserPlus, Twitter, Mic, Loader2 } from "lucide-react";
 import TopBar from "@/components/TopBar";
+import { useVoice } from "@/hooks/use-voice";
 import type { LucideIcon } from "lucide-react";
 import { agentsApi } from "@/api/agents";
+import { sessionsApi } from "@/api/sessions";
 import type { DiscoverEntry } from "@/api/types";
 
 // --- Icon and color maps (backend can't serve icons) ---
@@ -59,6 +61,67 @@ export default function Home() {
   const [agents, setAgents] = useState<DiscoverEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Voice: create a session on-demand so the mic works from the home page
+  const [voiceSessionId, setVoiceSessionId] = useState<string | null>(null);
+  const [voiceCreating, setVoiceCreating] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  // Track whether we should auto-start voice after session creation
+  const pendingVoiceStart = useRef(false);
+
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
+    // When the user finishes speaking, navigate to workspace with the transcript
+    if (role === "user" && voiceSessionId) {
+      navigate(`/workspace?session=${encodeURIComponent(voiceSessionId)}&prompt=${encodeURIComponent(text)}&voice=true`);
+    }
+  }, [navigate, voiceSessionId]);
+
+  const handleVoiceError = useCallback((message: string) => {
+    console.warn("[Voice]", message);
+    setVoiceError(message);
+    setTimeout(() => setVoiceError(null), 6000);
+  }, []);
+
+  const { state: voiceState, start: startVoice, stop: stopVoice } = useVoice({
+    sessionId: voiceSessionId ?? "",
+    onTranscript: handleVoiceTranscript,
+    onError: handleVoiceError,
+  });
+
+  // Auto-start voice once the session is created
+  useEffect(() => {
+    if (pendingVoiceStart.current && voiceSessionId && voiceState === "idle") {
+      pendingVoiceStart.current = false;
+      startVoice();
+    }
+  }, [voiceSessionId, voiceState, startVoice]);
+
+  const handleVoiceClick = useCallback(async () => {
+    // If already active, stop
+    if (voiceState === "listening" || voiceState === "speaking") {
+      stopVoice();
+      return;
+    }
+
+    // If session already exists, just start
+    if (voiceSessionId) {
+      startVoice();
+      return;
+    }
+
+    // Create a session first, then start voice
+    setVoiceCreating(true);
+    try {
+      const session = await sessionsApi.create();
+      setVoiceSessionId(session.session_id);
+      pendingVoiceStart.current = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to start voice session";
+      setVoiceError(msg);
+    } finally {
+      setVoiceCreating(false);
+    }
+  }, [voiceState, voiceSessionId, startVoice, stopVoice]);
 
   // Fetch agents on mount so data is ready when user toggles
   useEffect(() => {
@@ -117,9 +180,37 @@ export default function Home() {
             </p>
           </div>
 
+          {/* Voice status banner */}
+          {voiceError ? (
+            <div className="mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-destructive/10 text-destructive border border-destructive/20">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
+              {voiceError}
+            </div>
+          ) : (voiceState === "listening" || voiceState === "speaking") && (
+            <div className={[
+              "mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
+              voiceState === "listening"
+                ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                : "bg-primary/10 text-primary border border-primary/20",
+            ].join(" ")}>
+              <span className={[
+                "inline-block w-1.5 h-1.5 rounded-full",
+                voiceState === "listening" ? "bg-red-400 animate-pulse" : "bg-primary animate-pulse",
+              ].join(" ")} />
+              {voiceState === "listening" ? "Listening… speak now" : "Halia is speaking…"}
+            </div>
+          )}
+
           {/* Chat input */}
           <form onSubmit={handleSubmit} className="mb-6">
-            <div className="relative border border-border/60 rounded-xl bg-card/50 hover:border-primary/30 focus-within:border-primary/40 transition-colors shadow-sm">
+            <div className={[
+              "relative border rounded-xl bg-card/50 transition-colors shadow-sm",
+              voiceState === "listening"
+                ? "border-red-500/40"
+                : voiceState === "speaking"
+                ? "border-primary/40"
+                : "border-border/60 hover:border-primary/30 focus-within:border-primary/40",
+            ].join(" ")}>
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -136,10 +227,52 @@ export default function Home() {
                     handleSubmit(e);
                   }
                 }}
-                placeholder="Describe a task for the hive..."
-                className="w-full bg-transparent px-5 py-4 pr-12 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none rounded-xl resize-none overflow-y-auto"
+                placeholder={
+                  voiceState === "listening"
+                    ? "Listening… or type here"
+                    : voiceState === "speaking"
+                    ? "Halia is speaking…"
+                    : "Describe a task for the hive… or click the mic"
+                }
+                className="w-full bg-transparent px-5 py-4 pr-24 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none rounded-xl resize-none overflow-y-auto"
               />
-              <div className="absolute right-3 bottom-2.5">
+              <div className="absolute right-3 bottom-2.5 flex items-center gap-1.5">
+                {/* Voice button */}
+                <button
+                  type="button"
+                  onClick={handleVoiceClick}
+                  disabled={voiceCreating || voiceState === "connecting"}
+                  title={
+                    voiceState === "listening" || voiceState === "speaking"
+                      ? "Click to stop"
+                      : voiceCreating || voiceState === "connecting"
+                      ? "Connecting…"
+                      : "Click to speak"
+                  }
+                  aria-label={
+                    voiceState === "listening" ? "Listening — click to stop"
+                      : voiceState === "speaking" ? "Halia is speaking"
+                      : voiceCreating || voiceState === "connecting" ? "Connecting voice…"
+                      : "Start voice input"
+                  }
+                  className={[
+                    "w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200",
+                    voiceState === "listening"
+                      ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
+                      : voiceState === "speaking"
+                      ? "bg-primary/20 text-primary border border-primary/50"
+                      : voiceCreating || voiceState === "connecting"
+                      ? "bg-muted/60 text-muted-foreground border border-border opacity-60 cursor-wait"
+                      : "bg-muted/60 text-muted-foreground border border-border hover:text-foreground hover:bg-muted",
+                  ].join(" ")}
+                >
+                  {voiceCreating || voiceState === "connecting" ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Mic className="w-3.5 h-3.5" />
+                  )}
+                </button>
+                {/* Send button */}
                 <button
                   type="submit"
                   disabled={!inputValue.trim()}
