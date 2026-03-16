@@ -68,58 +68,6 @@ export default function Home() {
     speak("Describe a task for the hive, or click the mic.");
   }, [speak]);
 
-  // Typewriter animation — cycles through promptHints in the text field.
-  // Stops when the user manually types or voice transcript arrives.
-  const [typewriterActive, setTypewriterActive] = useState(true);
-  const typewriterRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (!typewriterActive) return;
-
-    let hintIndex = 0;
-    let charIndex = 0;
-    let deleting = false;
-    let cancelled = false;
-
-    const tick = () => {
-      if (cancelled) return;
-      const current = promptHints[hintIndex];
-
-      if (!deleting) {
-        charIndex++;
-        setInputValue(current.slice(0, charIndex));
-        if (charIndex === current.length) {
-          // Pause at end before deleting
-          typewriterRef.current = setTimeout(tick, 1800);
-          deleting = true;
-          return;
-        }
-        typewriterRef.current = setTimeout(tick, 48);
-      } else {
-        charIndex--;
-        setInputValue(current.slice(0, charIndex));
-        if (charIndex === 0) {
-          deleting = false;
-          hintIndex = (hintIndex + 1) % promptHints.length;
-          typewriterRef.current = setTimeout(tick, 400);
-          return;
-        }
-        typewriterRef.current = setTimeout(tick, 24);
-      }
-    };
-
-    typewriterRef.current = setTimeout(tick, 800);
-
-    return () => {
-      cancelled = true;
-      if (typewriterRef.current) clearTimeout(typewriterRef.current);
-    };
-  }, [typewriterActive]);
-
-  const stopTypewriter = useCallback(() => {
-    if (typewriterRef.current) clearTimeout(typewriterRef.current);
-    setTypewriterActive(false);
-  }, []);
   const [showAgents, setShowAgents] = useState(false);
   const [agents, setAgents] = useState<DiscoverEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -137,7 +85,6 @@ export default function Home() {
 
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
     if (role === "user" && text.trim()) {
-      stopTypewriter();
       if (isFinal) {
         // Gemini's final message contains the complete utterance text.
         voiceAccumRef.current = "";
@@ -150,7 +97,7 @@ export default function Home() {
       }
       textareaRef.current?.focus();
     }
-  }, [stopTypewriter]);
+  }, []);
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
@@ -164,14 +111,13 @@ export default function Home() {
     onError: handleVoiceError,
   });
 
-  // Stop typewriter and clear accumulated transcript when voice starts listening.
+  // Clear accumulated transcript when voice starts listening.
   useEffect(() => {
     if (voiceState === "listening") {
-      stopTypewriter();
       voiceAccumRef.current = "";
       setInputValue("");
     }
-  }, [voiceState, stopTypewriter]);
+  }, [voiceState]);
 
   // Auto-start voice once session is ready
   useEffect(() => {
@@ -232,7 +178,6 @@ export default function Home() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (inputValue.trim()) {
-      stopTypewriter();
       navigate(`/workspace?agent=new-agent&prompt=${encodeURIComponent(inputValue.trim())}`);
     }
   };
@@ -289,8 +234,6 @@ export default function Home() {
               "relative border rounded-xl bg-card/50 transition-colors shadow-sm",
               voiceState === "listening"
                 ? "border-red-500/40"
-                : typewriterActive
-                ? "border-primary/30"
                 : "border-border/60 hover:border-primary/30 focus-within:border-primary/40",
             ].join(" ")}>
               <textarea
@@ -298,7 +241,6 @@ export default function Home() {
                 rows={1}
                 value={inputValue}
                 onChange={(e) => {
-                  stopTypewriter();
                   setInputValue(e.target.value);
                   const ta = e.target;
                   ta.style.height = "auto";
@@ -315,12 +257,7 @@ export default function Home() {
                     ? "Listening… click stop when done"
                     : "Describe a task for the hive… or click the mic"
                 }
-                className={[
-                  "w-full bg-transparent px-5 py-4 pr-24 text-sm focus:outline-none rounded-xl resize-none overflow-y-auto",
-                  typewriterActive
-                    ? "text-muted-foreground placeholder:text-muted-foreground/60"
-                    : "text-foreground placeholder:text-muted-foreground/60",
-                ].join(" ")}
+                className="w-full bg-transparent px-5 py-4 pr-24 text-sm focus:outline-none rounded-xl resize-none overflow-y-auto text-foreground placeholder:text-muted-foreground/60"
               />
               <div className="absolute right-3 bottom-2.5 flex items-center gap-1.5">
                 <VoiceButton
@@ -339,12 +276,6 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            {/* Press Enter hint — shown during typewriter animation */}
-            {typewriterActive && inputValue && (
-              <p className="mt-2 text-center text-xs text-muted-foreground/60 animate-pulse">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted/60 border border-border/60 font-mono text-[10px]">Enter</kbd> to try this, or just start typing your own task
-              </p>
-            )}
           </form>
 
           {/* Action buttons */}
