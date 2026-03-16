@@ -4,7 +4,6 @@ import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon,
 import TopBar from "@/components/TopBar";
 import VoiceButton from "@/components/VoiceButton";
 import { useVoice } from "@/hooks/use-voice";
-import { useTTS } from "@/hooks/use-tts";
 import type { LucideIcon } from "lucide-react";
 import { agentsApi } from "@/api/agents";
 
@@ -59,14 +58,7 @@ export default function Home() {
   const navigate = useNavigate();
   const [inputValue, setInputValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { speak } = useTTS();
-  // Speak the greeting once on first user interaction (autoplay policy)
-  const greetingSpoken = useRef(false);
-  const speakGreeting = useCallback(() => {
-    if (greetingSpoken.current) return;
-    greetingSpoken.current = true;
-    speak("Describe a task for the hive, or click the mic.");
-  }, [speak]);
+
 
   const [showAgents, setShowAgents] = useState(false);
   const [agents, setAgents] = useState<DiscoverEntry[]>([]);
@@ -78,22 +70,26 @@ export default function Home() {
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const pendingVoiceStart = useRef(false);
 
-  // Accumulates interim transcript deltas within a single utterance.
-  // Gemini sends incremental chunks ("build", "an", "agent") not cumulative text,
-  // so we concatenate them ourselves and reset when finished=true.
+  // voiceCommittedRef: all text from fully-finished utterances this session.
+  // voiceAccumRef: interim delta chunks for the utterance in progress.
+  // Kept separate so interim display = committed + in-progress without losing prior sentences.
+  const voiceCommittedRef = useRef("");
   const voiceAccumRef = useRef("");
 
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
     if (role === "user" && text.trim()) {
       if (isFinal) {
-        // Gemini's final message contains the complete utterance text.
+        const sep = voiceCommittedRef.current && !voiceCommittedRef.current.endsWith(" ") ? " " : "";
+        voiceCommittedRef.current = (voiceCommittedRef.current + sep + text).trim();
         voiceAccumRef.current = "";
-        setInputValue(text);
+        setInputValue(voiceCommittedRef.current);
       } else {
-        // Interim: delta chunk — accumulate with a space separator.
+        // Interim delta — append to current accumulation and show over committed base.
         const sep = voiceAccumRef.current && !voiceAccumRef.current.endsWith(" ") ? " " : "";
         voiceAccumRef.current += sep + text;
-        setInputValue(voiceAccumRef.current);
+        const base = voiceCommittedRef.current;
+        const sep2 = base && !base.endsWith(" ") ? " " : "";
+        setInputValue((base + sep2 + voiceAccumRef.current).trim());
       }
       textareaRef.current?.focus();
     }
@@ -124,7 +120,7 @@ export default function Home() {
       stopVoice();
       return;
     }
-    speakGreeting();
+    voiceCommittedRef.current = "";
     voiceAccumRef.current = "";
     setInputValue("");
     if (voiceSessionId) {
@@ -142,7 +138,7 @@ export default function Home() {
     } finally {
       setVoiceCreating(false);
     }
-  }, [voiceState, voiceSessionId, startVoice, stopVoice, speakGreeting]);
+  }, [voiceState, voiceSessionId, startVoice, stopVoice]);
 
   // Fetch agents on mount so data is ready when user toggles
   useEffect(() => {
