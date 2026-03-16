@@ -87,10 +87,12 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
 
     api_key = _get_api_key(request)
     if not api_key:
-        await ws.send_json({
-            "type": "error",
-            "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
-        })
+        await ws.send_json(
+            {
+                "type": "error",
+                "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
+            }
+        )
         await ws.close()
         return ws
 
@@ -179,10 +181,12 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                     # Only forward audio when Gemini is responding to a [HIVE]: inject —
                     # suppress any audio Gemini generates in response to user speech.
                     if response.data and allow_audio:
-                        await ws.send_json({
-                            "type": "audio_chunk",
-                            "data": base64.b64encode(response.data).decode(),
-                        })
+                        await ws.send_json(
+                            {
+                                "type": "audio_chunk",
+                                "data": base64.b64encode(response.data).decode(),
+                            }
+                        )
 
                     if sc.interrupted:
                         allow_audio = False
@@ -194,21 +198,25 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
 
                     if sc.input_transcription and sc.input_transcription.text:
                         trans = sc.input_transcription
-                        await ws.send_json({
-                            "type": "user_transcript",
-                            "text": trans.text,
-                            "finished": bool(trans.finished),
-                        })
+                        await ws.send_json(
+                            {
+                                "type": "user_transcript",
+                                "text": trans.text,
+                                "finished": bool(trans.finished),
+                            }
+                        )
                         if trans.finished:
                             await _inject_to_queen(session, trans.text)
 
                     if sc.output_transcription and sc.output_transcription.text:
                         trans = sc.output_transcription
-                        await ws.send_json({
-                            "type": "assistant_transcript",
-                            "text": trans.text,
-                            "finished": bool(trans.finished),
-                        })
+                        await ws.send_json(
+                            {
+                                "type": "assistant_transcript",
+                                "text": trans.text,
+                                "finished": bool(trans.finished),
+                            }
+                        )
 
             browser_task = asyncio.ensure_future(browser_to_gemini())
             gemini_task = asyncio.ensure_future(gemini_to_browser())
