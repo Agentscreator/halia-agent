@@ -1114,6 +1114,49 @@ class LiteLLMProvider(LLMProvider):
                 return
 
             except Exception as e:
+                # LiteLLM's stream_chunk_builder crashes on finish_reason='refusal'
+                # (a valid Anthropic response for content policy) because its pydantic
+                # model doesn't include 'refusal' as an allowed value.  The crash
+                # happens in post-processing/logging AFTER all real stream chunks were
+                # already delivered to us.  If we already have content, treat this as
+                # a successful completion with unknown usage stats rather than a
+                # stream error that would discard the response and trigger a retry.
+                if (
+                    "building chunks for logging" in str(e).lower()
+                    and (accumulated_text or tool_calls_acc)
+                ):
+                    logger.warning(
+                        f"[stream] {self.model} stream_chunk_builder failed "
+                        f"(likely finish_reason='refusal' in LiteLLM pydantic model) "
+                        f"but content was already received — treating as complete. "
+                        f"Error: {e!s}"
+                    )
+                    if accumulated_text:
+                        tail_events.append(TextEndEvent(full_text=accumulated_text))
+                    for _idx, tc_data in sorted(tool_calls_acc.items()):
+                        try:
+                            parsed_args = json.loads(tc_data["arguments"])
+                        except (json.JSONDecodeError, KeyError):
+                            parsed_args = {"_raw": tc_data.get("arguments", "")}
+                        tail_events.append(
+                            ToolCallEvent(
+                                tool_use_id=tc_data["id"],
+                                tool_name=tc_data["name"],
+                                tool_input=parsed_args,
+                            )
+                        )
+                    tail_events.append(
+                        FinishEvent(
+                            stop_reason="stop",
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            model=self.model,
+                        )
+                    )
+                    for event in tail_events:
+                        yield event
+                    return
+
                 if _is_stream_transient_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
                     wait = _compute_retry_delay(attempt, exception=e)
                     logger.warning(

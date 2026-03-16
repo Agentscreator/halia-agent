@@ -671,6 +671,7 @@ class EventLoopNode(NodeProtocol):
             )
             _stream_retry_count = 0
             _turn_cancelled = False
+            turn_tokens: dict[str, Any] = {}  # populated on successful _run_single_turn
             while True:
                 try:
                     (
