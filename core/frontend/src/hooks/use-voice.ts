@@ -171,17 +171,17 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
         setStateBoth("connecting");
         reconnectTimerRef.current = setTimeout(() => {
           if (shouldReconnectRef.current) connectRef.current?.();
-        }, 1500);
+        }, 300);
       } else {
         setStateBoth("idle");
       }
     };
 
     ws.onerror = () => {
-      onErrorRef.current?.("Voice connection failed");
-      shouldReconnectRef.current = false;
-      cleanupConnection();
-      setStateBoth("error");
+      // Don't stop reconnect here — ws.onclose always fires after onerror
+      // and the reconnect logic there will handle retrying.
+      // Only fatal server-level errors (received as JSON messages) disable reconnect.
+      onErrorRef.current?.("Voice connection lost — reconnecting…");
     };
 
     ws.onopen = async () => {

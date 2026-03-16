@@ -77,10 +77,12 @@ export default function Home() {
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const pendingVoiceStart = useRef(false);
 
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
-    if (role === "user" && isFinal) {
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", _isFinal: boolean) => {
+    // Show all user transcripts (interim + final) so speech appears in the box live.
+    // User can edit then press Enter to submit.
+    if (role === "user" && text.trim()) {
       setInputValue(text);
-      setTimeout(() => textareaRef.current?.focus(), 50);
+      textareaRef.current?.focus();
     }
   }, []);
 
