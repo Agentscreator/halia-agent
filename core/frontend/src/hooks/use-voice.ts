@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type VoiceState = "idle" | "connecting" | "listening" | "speaking" | "error";
+export type VoiceState = "idle" | "connecting" | "listening" | "error";
 
 interface UseVoiceOptions {
   sessionId: string;
@@ -20,32 +20,13 @@ function float32ToInt16Base64(samples: Float32Array): string {
   return btoa(binary);
 }
 
-/** Decode base64 int16 PCM into a Web Audio AudioBuffer at the given sample rate. */
-function int16Base64ToAudioBuffer(b64: string, ctx: AudioContext): AudioBuffer | null {
-  try {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-    const buffer = ctx.createBuffer(1, float32.length, ctx.sampleRate);
-    buffer.copyToChannel(float32, 0);
-    return buffer;
-  } catch {
-    return null;
-  }
-}
-
 export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) {
   const [state, setState] = useState<VoiceState>("idle");
 
   const wsRef = useRef<WebSocket | null>(null);
   const captureCtxRef = useRef<AudioContext | null>(null);
-  const playbackCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const nextPlayAtRef = useRef(0);
 
   // Stable refs so callbacks never go stale
   const onTranscriptRef = useRef(onTranscript);
@@ -65,28 +46,6 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
     wsRef.current?.close();
     wsRef.current = null;
-
-    nextPlayAtRef.current = 0;
-  }, []);
-
-  const playAudioChunk = useCallback((b64: string) => {
-    // Lazy-init a dedicated 24 kHz playback context (Gemini outputs 24 kHz PCM)
-    if (!playbackCtxRef.current || playbackCtxRef.current.state === "closed") {
-      playbackCtxRef.current = new AudioContext({ sampleRate: 24000 });
-    }
-    const ctx = playbackCtxRef.current;
-    const buffer = int16Base64ToAudioBuffer(b64, ctx);
-    if (!buffer) return;
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-
-    // Schedule chunks back-to-back for gapless playback
-    const now = ctx.currentTime;
-    const startAt = Math.max(now, nextPlayAtRef.current);
-    source.start(startAt);
-    nextPlayAtRef.current = startAt + buffer.duration;
   }, []);
 
   const start = useCallback(async () => {
@@ -109,16 +68,8 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
         if (msg.type === "ready") {
           setState("listening");
-        } else if (msg.type === "audio_chunk" && msg.data) {
-          setState("speaking");
-          playAudioChunk(msg.data);
         } else if (msg.type === "transcript" && msg.text) {
-          onTranscriptRef.current?.(msg.text, (msg.role as "user" | "assistant") ?? "assistant");
-          // Return to listening after assistant speaks
-          if (msg.role === "assistant") {
-            // Small delay to avoid flickering if more audio chunks follow
-            setTimeout(() => setState((s) => (s === "speaking" ? "listening" : s)), 800);
-          }
+          onTranscriptRef.current?.(msg.text, (msg.role as "user" | "assistant") ?? "user");
         } else if (msg.type === "error") {
           onErrorRef.current?.(msg.message ?? "Unknown voice error");
           cleanup();
@@ -182,7 +133,7 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
         setState("error");
       }
     };
-  }, [state, sessionId, cleanup, playAudioChunk]);
+  }, [state, sessionId, cleanup]);
 
   const stop = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

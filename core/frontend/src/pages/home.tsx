@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon, Send, Bot, Radar, Reply, DollarSign, MapPin, Calendar, UserPlus, Twitter, Mic, Loader2 } from "lucide-react";
 import TopBar from "@/components/TopBar";
 import { useVoice } from "@/hooks/use-voice";
+import { useTTS } from "@/hooks/use-tts";
 import type { LucideIcon } from "lucide-react";
 import { agentsApi } from "@/api/agents";
 import { sessionsApi } from "@/api/sessions";
@@ -57,6 +58,14 @@ export default function Home() {
   const navigate = useNavigate();
   const [inputValue, setInputValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { speak } = useTTS();
+  // Speak the greeting once on first user interaction (autoplay policy)
+  const greetingSpoken = useRef(false);
+  const speakGreeting = useCallback(() => {
+    if (greetingSpoken.current) return;
+    greetingSpoken.current = true;
+    speak("Describe a task for the hive, or click the mic.");
+  }, [speak]);
   const [showAgents, setShowAgents] = useState(false);
   const [agents, setAgents] = useState<DiscoverEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -70,11 +79,12 @@ export default function Home() {
   const pendingVoiceStart = useRef(false);
 
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
-    // When the user finishes speaking, navigate to workspace with the transcript
-    if (role === "user" && voiceSessionId) {
-      navigate(`/workspace?session=${encodeURIComponent(voiceSessionId)}&prompt=${encodeURIComponent(text)}&voice=true`);
+    // Populate the input box so the user can review/edit before sending
+    if (role === "user") {
+      setInputValue(text);
+      setTimeout(() => textareaRef.current?.focus(), 50);
     }
-  }, [navigate, voiceSessionId]);
+  }, []);
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
@@ -98,7 +108,7 @@ export default function Home() {
 
   const handleVoiceClick = useCallback(async () => {
     // If already active, stop
-    if (voiceState === "listening" || voiceState === "speaking") {
+    if (voiceState === "listening") {
       stopVoice();
       return;
     }
@@ -186,18 +196,10 @@ export default function Home() {
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
               {voiceError}
             </div>
-          ) : (voiceState === "listening" || voiceState === "speaking") && (
-            <div className={[
-              "mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
-              voiceState === "listening"
-                ? "bg-red-500/10 text-red-400 border border-red-500/20"
-                : "bg-primary/10 text-primary border border-primary/20",
-            ].join(" ")}>
-              <span className={[
-                "inline-block w-1.5 h-1.5 rounded-full",
-                voiceState === "listening" ? "bg-red-400 animate-pulse" : "bg-primary animate-pulse",
-              ].join(" ")} />
-              {voiceState === "listening" ? "Listening… speak now" : "Halia is speaking…"}
+          ) : voiceState === "listening" && (
+            <div className="mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+              Listening… click stop when done
             </div>
           )}
 
@@ -207,8 +209,6 @@ export default function Home() {
               "relative border rounded-xl bg-card/50 transition-colors shadow-sm",
               voiceState === "listening"
                 ? "border-red-500/40"
-                : voiceState === "speaking"
-                ? "border-primary/40"
                 : "border-border/60 hover:border-primary/30 focus-within:border-primary/40",
             ].join(" ")}>
               <textarea
@@ -229,9 +229,7 @@ export default function Home() {
                 }}
                 placeholder={
                   voiceState === "listening"
-                    ? "Listening… or type here"
-                    : voiceState === "speaking"
-                    ? "Halia is speaking…"
+                    ? "Listening… click stop when done"
                     : "Describe a task for the hive… or click the mic"
                 }
                 className="w-full bg-transparent px-5 py-4 pr-24 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none rounded-xl resize-none overflow-y-auto"
@@ -240,10 +238,10 @@ export default function Home() {
                 {/* Voice button */}
                 <button
                   type="button"
-                  onClick={handleVoiceClick}
+                  onClick={() => { speakGreeting(); handleVoiceClick(); }}
                   disabled={voiceCreating || voiceState === "connecting"}
                   title={
-                    voiceState === "listening" || voiceState === "speaking"
+                    voiceState === "listening"
                       ? "Click to stop"
                       : voiceCreating || voiceState === "connecting"
                       ? "Connecting…"
@@ -251,7 +249,6 @@ export default function Home() {
                   }
                   aria-label={
                     voiceState === "listening" ? "Listening — click to stop"
-                      : voiceState === "speaking" ? "Halia is speaking"
                       : voiceCreating || voiceState === "connecting" ? "Connecting voice…"
                       : "Start voice input"
                   }
@@ -259,8 +256,6 @@ export default function Home() {
                     "w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200",
                     voiceState === "listening"
                       ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
-                      : voiceState === "speaking"
-                      ? "bg-primary/20 text-primary border border-primary/50"
                       : voiceCreating || voiceState === "connecting"
                       ? "bg-muted/60 text-muted-foreground border border-border opacity-60 cursor-wait"
                       : "bg-muted/60 text-muted-foreground border border-border hover:text-foreground hover:bg-muted",

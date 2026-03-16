@@ -108,6 +108,7 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                 prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(voice_name="Aoede")
             )
         ),
+        input_audio_transcription=gtypes.AudioTranscriptionConfig(),
     )
 
     try:
@@ -137,27 +138,20 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                         break
 
             async def gemini_to_browser() -> None:
-                """Forward Gemini responses (audio + text) to browser."""
+                """Forward user speech transcripts to the browser (STT only)."""
                 async for response in gemini.receive():
                     if ws.closed:
                         break
-                    if response.data:
-                        # PCM int16 24kHz mono — send as base64
-                        await ws.send_json(
-                            {
-                                "type": "audio_chunk",
-                                "data": base64.b64encode(response.data).decode(),
-                            }
-                        )
-                    if response.text:
+                    # Send user speech transcript so the frontend can populate the input box
+                    sc = response.server_content
+                    if sc and sc.input_transcription and sc.input_transcription.text:
                         await ws.send_json(
                             {
                                 "type": "transcript",
-                                "text": response.text,
-                                "role": "assistant",
+                                "text": sc.input_transcription.text,
+                                "role": "user",
                             }
                         )
-                        await _inject_to_queen(session, response.text)
 
             browser_task = asyncio.ensure_future(browser_to_gemini())
             gemini_task = asyncio.ensure_future(gemini_to_browser())

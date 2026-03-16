@@ -231,7 +231,6 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
 export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase, sessionId, autoStartVoice }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
-  const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -240,21 +239,12 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
 
   // Voice integration — only active when a sessionId is provided
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
-    const msg: ChatMessage = {
-      id: `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      agent: role === "user" ? "You" : "Halia",
-      agentColor: role === "user" ? "hsl(200,70%,50%)" : "hsl(210,85%,55%)",
-      content: text,
-      timestamp: new Date().toISOString(),
-      type: role === "user" ? "user" : "agent",
-      role: role === "assistant" ? "queen" : undefined,
-      thread: activeThread,
-      createdAt: Date.now(),
-    };
-    setVoiceMessages((prev) => [...prev, msg]);
-    // Also inject user speech into the text pipeline so the agent stays in context
-    if (role === "user") onSend(text, activeThread);
-  }, [activeThread, onSend]);
+    if (role === "user") {
+      // Populate the input box so the user can review/edit before sending
+      setInput(text);
+      setTimeout(() => textareaRef.current?.focus(), 50);
+    }
+  }, []);
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
@@ -267,11 +257,6 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
   });
-
-  // Clear voice messages when switching threads
-  useEffect(() => {
-    setVoiceMessages([]);
-  }, [activeThread]);
 
   // Auto-start voice when navigated from home page mic button
   const autoStartFired = useRef(false);
@@ -290,7 +275,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
 
   // Enter voice mode automatically when voice recording starts
   useEffect(() => {
-    if (voiceState === "listening" || voiceState === "speaking") {
+    if (voiceState === "listening") {
       setVoiceMode(true);
     }
   }, [voiceState]);
@@ -329,19 +314,17 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const handleVoiceModeOff = useCallback(() => {
     setVoiceMode(false);
     cancelTTS();
-    // Also stop live voice if active
-    if (voiceState === "listening" || voiceState === "speaking") {
+    if (voiceState === "listening") {
       stopVoice();
     }
   }, [cancelTTS, voiceState, stopVoice]);
 
-  const threadMessages = [
-    ...messages.filter((m) => {
+  const threadMessages = messages
+    .filter((m) => {
       if (m.type === "system" && !m.thread) return false;
       return m.thread === activeThread;
-    }),
-    ...voiceMessages,
-  ].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    })
+    .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   // Mark current thread as read
   useEffect(() => {
@@ -472,18 +455,10 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
               {voiceError}
             </div>
-          ) : (voiceState === "listening" || voiceState === "speaking") && (
-            <div className={[
-              "mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
-              voiceState === "listening"
-                ? "bg-red-500/10 text-red-400 border border-red-500/20"
-                : "bg-primary/10 text-primary border border-primary/20",
-            ].join(" ")}>
-              <span className={[
-                "inline-block w-1.5 h-1.5 rounded-full",
-                voiceState === "listening" ? "bg-red-400 animate-pulse" : "bg-primary animate-pulse",
-              ].join(" ")} />
-              {voiceState === "listening" ? "Listening… speak now" : "Halia is speaking…"}
+          ) : voiceState === "listening" && (
+            <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+              Listening… speak now, then click stop
             </div>
           )}
 
@@ -491,8 +466,6 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
             "flex items-center gap-3 bg-muted/40 rounded-xl px-4 py-2.5 border transition-colors",
             voiceState === "listening"
               ? "border-red-500/40"
-              : voiceState === "speaking"
-              ? "border-primary/40"
               : "border-border focus-within:border-primary/40",
           ].join(" ")}>
             <textarea
@@ -513,9 +486,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
               }}
               placeholder={
                 voiceState === "listening"
-                  ? "Listening… or type here"
-                  : voiceState === "speaking"
-                  ? "Halia is speaking…"
+                  ? "Listening… click stop when done"
                   : disabled
                   ? "Connecting to agent..."
                   : "Message Halia… or click the mic"
