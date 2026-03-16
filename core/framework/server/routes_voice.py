@@ -36,7 +36,11 @@ def _get_api_key(request: web.Request) -> str | None:
                         return cred.keys[key_name].get_secret_value()
         except Exception:
             pass
-    return os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    return (
+        os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or "AIzaSyD8tGZA4RcX3-MoUmdh6bAVePNEjr5mXvg"
+    )
 
 
 async def _inject_to_queen(session: Any, text: str) -> None:
