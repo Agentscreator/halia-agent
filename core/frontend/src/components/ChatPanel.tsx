@@ -1,5 +1,5 @@
 import { memo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Crown, Cpu, Check, Loader2 } from "lucide-react";
+import { Send, Square, Crown, Cpu, Check, Loader2, Volume2 } from "lucide-react";
 import MarkdownContent from "@/components/MarkdownContent";
 import QuestionWidget from "@/components/QuestionWidget";
 import VoiceButton from "@/components/VoiceButton";
@@ -154,6 +154,7 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
   const isUser = msg.type === "user";
   const isQueen = msg.role === "queen";
   const color = getColor(msg.agent, msg.role);
+  const { speak, cancel, speaking } = useTTS();
 
   if (msg.type === "system") {
     return (
@@ -215,6 +216,19 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
                     : "building phase"
               : "Worker"}
           </span>
+          {msg.content?.trim() && (
+            <button
+              onClick={() => speaking ? cancel() : speak(msg.content)}
+              className={`ml-0.5 flex items-center justify-center w-5 h-5 rounded-md transition-colors ${
+                speaking
+                  ? "text-primary bg-primary/10"
+                  : "text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted/60"
+              }`}
+              title={speaking ? "Stop" : "Read aloud"}
+            >
+              {speaking ? <Square className="w-2.5 h-2.5 fill-current" /> : <Volume2 className="w-3 h-3" />}
+            </button>
+          )}
         </div>
         <div
           className={`text-sm leading-relaxed rounded-2xl rounded-tl-md px-4 py-3 ${
@@ -233,41 +247,6 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const [readMap, setReadMap] = useState<Record<string, number>>({});
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
 
-  // Auto-read agent/queen messages aloud via Gemini TTS.
-  // Strategy: accumulate pending queen message IDs as they stream in, then
-  // speak them when isWaiting transitions false→true (= each LLM turn just
-  // finished streaming, signalled by the node_loop_iteration SSE event).
-  const { speak } = useTTS();
-  const ttsSpokenIds = useRef(new Set<string>());
-  const ttsPendingIds = useRef(new Set<string>());
-  const prevIsWaiting = useRef(isWaiting);
-
-  // Track which message IDs are candidates for TTS as they stream in.
-  useEffect(() => {
-    for (const msg of messages) {
-      if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
-      if (!msg.content?.trim()) continue;
-      if (ttsSpokenIds.current.has(msg.id)) continue;
-      ttsPendingIds.current.add(msg.id);
-    }
-  }, [messages]);
-
-  // When isWaiting goes false→true the current LLM turn is done — speak pending messages.
-  useEffect(() => {
-    const wasWaiting = prevIsWaiting.current;
-    prevIsWaiting.current = isWaiting;
-    if (!wasWaiting && isWaiting && ttsPendingIds.current.size > 0) {
-      const byId = new Map(messages.map((m) => [m.id, m]));
-      for (const id of ttsPendingIds.current) {
-        const msg = byId.get(id);
-        if (msg?.content?.trim() && !ttsSpokenIds.current.has(id)) {
-          ttsSpokenIds.current.add(id);
-          speak(msg.content);
-        }
-      }
-      ttsPendingIds.current.clear();
-    }
-  }, [isWaiting, messages, speak]);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
