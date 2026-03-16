@@ -13,7 +13,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 # Gemini Live model — supports native audio I/O
-_GEMINI_LIVE_MODEL = "gemini-live-2.5-flash-preview"
+_GEMINI_LIVE_MODEL = "gemini-2.0-flash-live-001"
 
 _SYSTEM_PROMPT = (
     "You are Halia, a voice-first AI assistant. "
