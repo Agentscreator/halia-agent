@@ -15,19 +15,18 @@ logger = logging.getLogger(__name__)
 _GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 
 _SYSTEM_PROMPT = (
-    "You are Halia, the voice interface for Hive — a multi-agent AI system. "
-    "You speak responses aloud and keep them conversational and concise. "
-    "Avoid markdown or formatting that doesn't translate to speech. "
-    "\n\n"
-    "When you receive a message starting with [HIVE]:, read it aloud naturally "
-    "as if it is your own response. After reading options or a list, always end with: "
-    "'You can tap an option on screen, or just tell me which one you want.' "
-    "\n\n"
-    "If you could not understand what the user said, say exactly: "
-    "'I didn't catch that — could you say that again, or tap an option on screen?' "
-    "\n\n"
-    "Do not add commentary or opinions — just relay the Hive's messages and guide "
-    "the user through their choice."
+    "You are a voice relay for an AI agent system. "
+    "You have exactly two jobs and nothing else:\n\n"
+    "1. TRANSCRIPTION: When the user speaks, their words are automatically transcribed "
+    "by the system. You do NOT respond to what the user says. Stay completely silent "
+    "when the user speaks. Do not acknowledge, answer, or react to user speech in any way.\n\n"
+    "2. READ-ALOUD: When you receive a message starting with [HIVE]:, immediately read "
+    "it aloud verbatim (without the [HIVE]: prefix), naturally and conversationally. "
+    "Do not add any words, commentary, or filler before or after — just read exactly "
+    "what the [HIVE]: message says.\n\n"
+    "CRITICAL: If the user says anything — a question, a greeting, anything — do NOT "
+    "respond. Silence is correct. The AI agent system will process their speech and send "
+    "you a [HIVE]: message when it is ready to speak. Wait for [HIVE]: messages only."
 )
 
 
@@ -126,10 +125,12 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
         async with client.aio.live.connect(model=_GEMINI_LIVE_MODEL, config=config) as gemini:
             await ws.send_json({"type": "ready"})
 
-            # Queue for text injections from the hive so they don't race with audio
-            inject_queue: asyncio.Queue[str] = asyncio.Queue()
+            # True while Gemini is allowed to produce audio (only after inject_text turns).
+            # We suppress Gemini audio that responds to user speech so it acts as pure STT.
+            allow_audio = False
 
             async def browser_to_gemini() -> None:
+                nonlocal allow_audio
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         try:
@@ -147,7 +148,9 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                                 )
                             )
                         elif data.get("type") == "inject_text" and data.get("text"):
-                            # Hive agent response — tell Gemini to read it aloud
+                            # Hive agent response — tell Gemini to read it aloud.
+                            # Enable audio so the response is forwarded to the browser.
+                            allow_audio = True
                             text = data["text"]
                             await gemini.send(
                                 input=gtypes.LiveClientContent(
@@ -164,6 +167,7 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                         break
 
             async def gemini_to_browser() -> None:
+                nonlocal allow_audio
                 async for response in gemini.receive():
                     if ws.closed:
                         break
@@ -172,14 +176,21 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                     if not sc:
                         continue
 
-                    if response.data:
+                    # Only forward audio when Gemini is responding to a [HIVE]: inject —
+                    # suppress any audio Gemini generates in response to user speech.
+                    if response.data and allow_audio:
                         await ws.send_json({
                             "type": "audio_chunk",
                             "data": base64.b64encode(response.data).decode(),
                         })
 
                     if sc.interrupted:
+                        allow_audio = False
                         await ws.send_json({"type": "interrupted"})
+
+                    # When Gemini finishes its turn (turn_complete), reset the audio gate.
+                    if sc.turn_complete:
+                        allow_audio = False
 
                     if sc.input_transcription and sc.input_transcription.text:
                         trans = sc.input_transcription

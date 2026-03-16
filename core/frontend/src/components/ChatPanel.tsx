@@ -241,6 +241,10 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const pendingVoiceMsg = useRef<{ id: string; role: "user" | "assistant" } | null>(null);
 
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
+    // Only show user speech transcripts — assistant transcripts are just Gemini reading
+    // hive messages aloud, which are already displayed as hive message bubbles.
+    if (role === "assistant") return;
+
     setVoiceMessages((prev) => {
       const pending = pendingVoiceMsg.current;
       if (pending && pending.role === role) {
@@ -251,12 +255,11 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
       const id = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const msg: ChatMessage = {
         id,
-        agent: role === "user" ? "You" : "Halia",
-        agentColor: role === "user" ? "hsl(200,70%,50%)" : "hsl(210,85%,55%)",
+        agent: "You",
+        agentColor: "hsl(200,70%,50%)",
         content: text,
         timestamp: new Date().toISOString(),
-        type: role === "user" ? "user" : "agent",
-        role: role === "assistant" ? "queen" : undefined,
+        type: "user",
         thread: activeThread,
         createdAt: Date.now(),
       };
@@ -266,7 +269,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     });
 
     // Final user speech → mirror into input box AND auto-submit to hive agent
-    if (role === "user" && isFinal) {
+    if (isFinal) {
       setInput(text);
       onSend(text, activeThread);
     }
