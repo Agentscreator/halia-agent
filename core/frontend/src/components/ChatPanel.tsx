@@ -231,20 +231,51 @@ const MessageBubble = memo(function MessageBubble({ msg, queenPhase }: { msg: Ch
 export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting, isBusy, activeThread, disabled, onCancel, pendingQuestion, pendingOptions, onQuestionSubmit, onQuestionDismiss, queenPhase, sessionId, autoStartVoice }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
+  const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Voice integration — only active when a sessionId is provided
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal?: boolean) => {
-    if (role === "user") {
-      // Show interim text live as user speaks; focus on final
+  // Voice integration — show both sides of the Gemini Live conversation in chat
+  const pendingVoiceMsg = useRef<{ id: string; role: "user" | "assistant" } | null>(null);
+
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
+    setVoiceMessages((prev) => {
+      // Update an in-progress message for this role, or create a new one
+      const pending = pendingVoiceMsg.current;
+      if (pending && pending.role === role) {
+        // Update existing bubble
+        const updated = prev.map((m) =>
+          m.id === pending.id ? { ...m, content: text } : m
+        );
+        if (isFinal) pendingVoiceMsg.current = null;
+        return updated;
+      }
+      // New message
+      const id = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const msg: ChatMessage = {
+        id,
+        agent: role === "user" ? "You" : "Halia",
+        agentColor: role === "user" ? "hsl(200,70%,50%)" : "hsl(210,85%,55%)",
+        content: text,
+        timestamp: new Date().toISOString(),
+        type: role === "user" ? "user" : "agent",
+        role: role === "assistant" ? "queen" : undefined,
+        thread: activeThread,
+        createdAt: Date.now(),
+      };
+      if (!isFinal) pendingVoiceMsg.current = { id, role };
+      else pendingVoiceMsg.current = null;
+      return [...prev, msg];
+    });
+
+    // Also mirror final user speech into the input box
+    if (role === "user" && isFinal) {
       setInput(text);
-      if (isFinal) setTimeout(() => textareaRef.current?.focus(), 50);
     }
-  }, []);
+  }, [activeThread]);
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
@@ -273,9 +304,9 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   // Track which message IDs we've already sent to TTS to avoid duplicates
   const spokenIdsRef = useRef(new Set<string>());
 
-  // Enter voice mode automatically when voice recording starts
+  // Enter voice mode automatically when voice becomes active
   useEffect(() => {
-    if (voiceState === "listening") {
+    if (voiceState === "listening" || voiceState === "speaking") {
       setVoiceMode(true);
     }
   }, [voiceState]);
@@ -314,17 +345,21 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const handleVoiceModeOff = useCallback(() => {
     setVoiceMode(false);
     cancelTTS();
-    if (voiceState === "listening") {
+    if (voiceState === "listening" || voiceState === "speaking") {
       stopVoice();
     }
   }, [cancelTTS, voiceState, stopVoice]);
 
-  const threadMessages = messages
-    .filter((m) => {
+  // Clear voice messages when switching threads
+  useEffect(() => { setVoiceMessages([]); }, [activeThread]);
+
+  const threadMessages = [
+    ...messages.filter((m) => {
       if (m.type === "system" && !m.thread) return false;
       return m.thread === activeThread;
-    })
-    .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    }),
+    ...voiceMessages,
+  ].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   // Mark current thread as read
   useEffect(() => {
@@ -455,10 +490,18 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
               {voiceError}
             </div>
-          ) : voiceState === "listening" && (
-            <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-              Listening… speak now, then click stop
+          ) : (voiceState === "listening" || voiceState === "speaking") && (
+            <div className={[
+              "mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
+              voiceState === "listening"
+                ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                : "bg-primary/10 text-primary border border-primary/20",
+            ].join(" ")}>
+              <span className={[
+                "inline-block w-1.5 h-1.5 rounded-full animate-pulse",
+                voiceState === "listening" ? "bg-red-400" : "bg-primary",
+              ].join(" ")} />
+              {voiceState === "listening" ? "Listening… speak naturally" : "Halia is speaking — interrupt any time"}
             </div>
           )}
 
@@ -466,6 +509,8 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
             "flex items-center gap-3 bg-muted/40 rounded-xl px-4 py-2.5 border transition-colors",
             voiceState === "listening"
               ? "border-red-500/40"
+              : voiceState === "speaking"
+              ? "border-primary/40"
               : "border-border focus-within:border-primary/40",
           ].join(" ")}>
             <textarea

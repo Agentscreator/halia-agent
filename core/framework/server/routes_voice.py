@@ -16,9 +16,12 @@ logger = logging.getLogger(__name__)
 _GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 
 _SYSTEM_PROMPT = (
-    "You are Halia, a voice-first AI assistant. "
-    "Keep your responses conversational and concise — they will be spoken aloud. "
-    "Avoid markdown, bullet lists, or formatting that doesn't translate to speech."
+    "You are Halia, a voice-first AI assistant powered by Gemini Live. "
+    "You help users interact with the Hive agent system — a multi-agent framework "
+    "that creates and coordinates worker agents to complete tasks. "
+    "Keep responses conversational and concise since they will be spoken aloud. "
+    "Avoid markdown or formatting that doesn't translate to speech. "
+    "When the user describes a task, acknowledge it and let them know the Hive is on it."
 )
 
 
@@ -27,7 +30,6 @@ def _get_api_key(request: web.Request) -> str | None:
     store = request.app.get("credential_store")
     if store is not None:
         try:
-            # Try well-known key names stored via the credentials UI
             for key_name in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
                 creds = store.list_credentials()
                 for cid in creds:
@@ -40,32 +42,32 @@ def _get_api_key(request: web.Request) -> str | None:
 
 
 async def _inject_to_queen(session: Any, text: str) -> None:
-    """Inject an assistant voice response into the queen agent as context."""
+    """Inject a user voice input into the queen agent as context."""
     try:
         queen_executor = session.queen_executor
         if queen_executor is None:
             return
         node = queen_executor.node_registry.get("queen")
         if node is not None and hasattr(node, "inject_event"):
-            # inject as non-triggering context so the queen stays aware of the conversation
-            await node.inject_event(f"[Voice response]: {text}", is_client_input=False)
+            await node.inject_event(f"[Voice input]: {text}", is_client_input=True)
     except Exception as exc:
         logger.debug("Voice transcript injection failed: %s", exc)
 
 
 async def handle_voice(request: web.Request) -> web.WebSocketResponse:
-    """WebSocket /api/sessions/{session_id}/voice — Gemini Live audio proxy.
+    """WebSocket /api/sessions/{session_id}/voice — full Gemini Live audio proxy.
 
     Protocol (JSON over WebSocket):
       Client → Server:
         {"type": "audio_chunk", "data": "<base64 PCM int16 16kHz mono>"}
-        {"type": "end_of_turn"}   # user released mic button
 
       Server → Client:
-        {"type": "ready"}                                           # session open
-        {"type": "audio_chunk", "data": "<base64 PCM int16 24kHz mono>"}
-        {"type": "transcript", "text": "...", "role": "assistant"}
-        {"type": "error",   "message": "..."}
+        {"type": "ready"}
+        {"type": "audio_chunk", "data": "<base64 PCM int16 24kHz mono>"}   # Gemini speaking
+        {"type": "user_transcript",      "text": "...", "finished": bool}  # what user said
+        {"type": "assistant_transcript", "text": "...", "finished": bool}  # what Gemini said
+        {"type": "interrupted"}                                             # user interrupted
+        {"type": "error", "message": "..."}
     """
     from framework.server.app import resolve_session
 
@@ -82,12 +84,10 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
 
     api_key = _get_api_key(request)
     if not api_key:
-        await ws.send_json(
-            {
-                "type": "error",
-                "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
-            }
-        )
+        await ws.send_json({
+            "type": "error",
+            "message": "GOOGLE_API_KEY not configured. Add it via Settings → Credentials.",
+        })
         await ws.close()
         return ws
 
@@ -108,12 +108,14 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                 prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(voice_name="Aoede")
             )
         ),
+        # Transcribe both user speech and Gemini's audio output
         input_audio_transcription=gtypes.AudioTranscriptionConfig(),
+        output_audio_transcription=gtypes.AudioTranscriptionConfig(),
         realtime_input_config=gtypes.RealtimeInputConfig(
             automatic_activity_detection=gtypes.AutomaticActivityDetection(
-                # Wait 2s of silence before ending a turn so short pauses don't cut off
-                silence_duration_ms=2000,
-                start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_LOW,
+                # Respond quickly; short silence ends the user's turn
+                silence_duration_ms=800,
+                start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_HIGH,
             ),
         ),
     )
@@ -123,7 +125,7 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
             await ws.send_json({"type": "ready"})
 
             async def browser_to_gemini() -> None:
-                """Forward browser audio chunks to Gemini Live."""
+                """Stream browser mic audio to Gemini Live."""
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         try:
@@ -143,22 +145,46 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                         break
 
             async def gemini_to_browser() -> None:
-                """Forward user speech transcripts to the browser (STT only)."""
+                """Forward Gemini audio, transcripts, and events to the browser."""
                 async for response in gemini.receive():
                     if ws.closed:
                         break
-                    # Only send transcript when the utterance is fully recognised
+
                     sc = response.server_content
-                    if sc and sc.input_transcription:
+                    if not sc:
+                        continue
+
+                    # Gemini speaking — send raw PCM audio to browser for playback
+                    if response.data:
+                        await ws.send_json({
+                            "type": "audio_chunk",
+                            "data": base64.b64encode(response.data).decode(),
+                        })
+
+                    # User interrupted Gemini — browser should clear its audio queue
+                    if sc.interrupted:
+                        await ws.send_json({"type": "interrupted"})
+
+                    # What the user said (input transcription)
+                    if sc.input_transcription and sc.input_transcription.text:
                         trans = sc.input_transcription
-                        if trans.text and trans.finished:
-                            await ws.send_json(
-                                {
-                                    "type": "transcript",
-                                    "text": trans.text,
-                                    "role": "user",
-                                }
-                            )
+                        await ws.send_json({
+                            "type": "user_transcript",
+                            "text": trans.text,
+                            "finished": bool(trans.finished),
+                        })
+                        # Inject final user utterances into the hive agent pipeline
+                        if trans.finished:
+                            await _inject_to_queen(session, trans.text)
+
+                    # What Gemini said (output transcription)
+                    if sc.output_transcription and sc.output_transcription.text:
+                        trans = sc.output_transcription
+                        await ws.send_json({
+                            "type": "assistant_transcript",
+                            "text": trans.text,
+                            "finished": bool(trans.finished),
+                        })
 
             browser_task = asyncio.ensure_future(browser_to_gemini())
             gemini_task = asyncio.ensure_future(gemini_to_browser())

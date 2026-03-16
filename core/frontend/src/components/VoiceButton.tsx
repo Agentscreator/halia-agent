@@ -16,6 +16,7 @@ const LABELS: Record<VoiceState, string> = {
   idle: "Click to speak",
   connecting: "Connecting…",
   listening: "Listening — click to stop",
+  speaking: "Halia is speaking — click to stop",
   error: "Voice error — try again",
 };
 
@@ -59,7 +60,7 @@ function AmplitudeBars({ getAmplitude }: { getAmplitude: () => number }) {
 }
 
 export default function VoiceButton({ state, onStart, onStop, disabled, noSession, getAmplitude }: VoiceButtonProps) {
-  const isActive = state === "listening";
+  const isActive = state === "listening" || state === "speaking";
 
   const handleClick = () => {
     if (isActive) onStop();
@@ -77,6 +78,8 @@ export default function VoiceButton({ state, onStart, onStop, disabled, noSessio
         "relative p-2 rounded-lg transition-all duration-200 flex items-center justify-center",
         state === "listening"
           ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
+          : state === "speaking"
+          ? "bg-primary/20 text-primary border border-primary/50 hover:bg-primary/30"
           : state === "error"
           ? "bg-destructive/20 text-destructive border border-destructive/40 opacity-60"
           : state === "connecting"
@@ -88,7 +91,7 @@ export default function VoiceButton({ state, onStart, onStop, disabled, noSessio
     >
       {state === "connecting" ? (
         <Loader2 className="w-4 h-4 animate-spin" />
-      ) : state === "listening" && getAmplitude ? (
+      ) : (state === "listening" || state === "speaking") && getAmplitude ? (
         <AmplitudeBars getAmplitude={getAmplitude} />
       ) : state === "error" ? (
         <MicOff className="w-4 h-4" />
@@ -96,9 +99,12 @@ export default function VoiceButton({ state, onStart, onStop, disabled, noSessio
         <Mic className="w-4 h-4" />
       )}
 
-      {/* Pulse ring when actively listening */}
-      {state === "listening" && (
-        <span className="absolute inset-0 rounded-lg animate-ping bg-red-500/20 pointer-events-none" />
+      {/* Pulse ring when active */}
+      {(state === "listening" || state === "speaking") && (
+        <span className={[
+          "absolute inset-0 rounded-lg animate-ping pointer-events-none",
+          state === "listening" ? "bg-red-500/20" : "bg-primary/20",
+        ].join(" ")} />
       )}
     </button>
   );

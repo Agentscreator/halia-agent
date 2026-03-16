@@ -72,12 +72,15 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [voiceSessionId, setVoiceSessionId] = useState<string | null>(null);
+  const [voiceCreating, setVoiceCreating] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const pendingVoiceStart = useRef(false);
 
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal?: boolean) => {
-    if (role === "user") {
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
+    if (role === "user" && isFinal) {
       setInputValue(text);
-      if (isFinal) setTimeout(() => textareaRef.current?.focus(), 50);
+      setTimeout(() => textareaRef.current?.focus(), 50);
     }
   }, []);
 
@@ -88,18 +91,41 @@ export default function Home() {
   }, []);
 
   const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude } = useVoice({
+    sessionId: voiceSessionId ?? "",
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
   });
 
-  const handleVoiceClick = useCallback(() => {
-    if (voiceState === "listening") {
-      stopVoice();
-    } else if (voiceState === "idle") {
-      speakGreeting();
+  // Auto-start voice once session is ready
+  useEffect(() => {
+    if (pendingVoiceStart.current && voiceSessionId && voiceState === "idle") {
+      pendingVoiceStart.current = false;
       startVoice();
     }
-  }, [voiceState, startVoice, stopVoice, speakGreeting]);
+  }, [voiceSessionId, voiceState, startVoice]);
+
+  const handleVoiceClick = useCallback(async () => {
+    if (voiceState === "listening" || voiceState === "speaking") {
+      stopVoice();
+      return;
+    }
+    speakGreeting();
+    if (voiceSessionId) {
+      startVoice();
+      return;
+    }
+    setVoiceCreating(true);
+    try {
+      const { sessionsApi } = await import("@/api/sessions");
+      const session = await sessionsApi.create();
+      setVoiceSessionId(session.session_id);
+      pendingVoiceStart.current = true;
+    } catch (err) {
+      setVoiceError(err instanceof Error ? err.message : "Failed to start voice session");
+    } finally {
+      setVoiceCreating(false);
+    }
+  }, [voiceState, voiceSessionId, startVoice, stopVoice, speakGreeting]);
 
   // Fetch agents on mount so data is ready when user toggles
   useEffect(() => {
@@ -164,10 +190,18 @@ export default function Home() {
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-destructive" />
               {voiceError}
             </div>
-          ) : voiceState === "listening" && (
-            <div className="mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/20">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-              Listening… click stop when done
+          ) : (voiceState === "listening" || voiceState === "speaking") && (
+            <div className={[
+              "mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2",
+              voiceState === "listening"
+                ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                : "bg-primary/10 text-primary border border-primary/20",
+            ].join(" ")}>
+              <span className={[
+                "inline-block w-1.5 h-1.5 rounded-full animate-pulse",
+                voiceState === "listening" ? "bg-red-400" : "bg-primary",
+              ].join(" ")} />
+              {voiceState === "listening" ? "Listening… speak naturally" : "Halia is speaking — interrupt any time"}
             </div>
           )}
 
@@ -204,7 +238,7 @@ export default function Home() {
               />
               <div className="absolute right-3 bottom-2.5 flex items-center gap-1.5">
                 <VoiceButton
-                  state={voiceState}
+                  state={voiceCreating ? "connecting" : voiceState}
                   onStart={handleVoiceClick}
                   onStop={handleVoiceClick}
                   getAmplitude={getAmplitude}
