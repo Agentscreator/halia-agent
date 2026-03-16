@@ -1121,9 +1121,8 @@ class LiteLLMProvider(LLMProvider):
                 # already delivered to us.  If we already have content, treat this as
                 # a successful completion with unknown usage stats rather than a
                 # stream error that would discard the response and trigger a retry.
-                if (
-                    "building chunks for logging" in str(e).lower()
-                    and (accumulated_text or tool_calls_acc)
+                if "building chunks for logging" in str(e).lower() and (
+                    accumulated_text or tool_calls_acc
                 ):
                     logger.warning(
                         f"[stream] {self.model} stream_chunk_builder failed "
