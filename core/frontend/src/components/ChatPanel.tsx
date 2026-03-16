@@ -252,7 +252,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     setTimeout(() => setVoiceError(null), 6000);
   }, []);
 
-  const { state: voiceState, start: startVoice, stop: stopVoice } = useVoice({
+  const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude } = useVoice({
     sessionId: sessionId ?? "",
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
@@ -502,6 +502,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
               onStop={stopVoice}
               disabled={disabled || !sessionId}
               noSession={!sessionId}
+              getAmplitude={getAmplitude}
             />
 
             {isBusy && onCancel ? (

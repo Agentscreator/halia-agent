@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon, Send, Bot, Radar, Reply, DollarSign, MapPin, Calendar, UserPlus, Twitter, Mic, Loader2 } from "lucide-react";
+import { Crown, Mail, Briefcase, Shield, Search, Newspaper, ArrowRight, Hexagon, Send, Bot, Radar, Reply, DollarSign, MapPin, Calendar, UserPlus, Twitter } from "lucide-react";
 import TopBar from "@/components/TopBar";
+import VoiceButton from "@/components/VoiceButton";
 import { useVoice } from "@/hooks/use-voice";
 import { useTTS } from "@/hooks/use-tts";
 import type { LucideIcon } from "lucide-react";
@@ -92,7 +93,7 @@ export default function Home() {
     setTimeout(() => setVoiceError(null), 6000);
   }, []);
 
-  const { state: voiceState, start: startVoice, stop: stopVoice } = useVoice({
+  const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude } = useVoice({
     sessionId: voiceSessionId ?? "",
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
@@ -235,38 +236,12 @@ export default function Home() {
                 className="w-full bg-transparent px-5 py-4 pr-24 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none rounded-xl resize-none overflow-y-auto"
               />
               <div className="absolute right-3 bottom-2.5 flex items-center gap-1.5">
-                {/* Voice button */}
-                <button
-                  type="button"
-                  onClick={() => { speakGreeting(); handleVoiceClick(); }}
-                  disabled={voiceCreating || voiceState === "connecting"}
-                  title={
-                    voiceState === "listening"
-                      ? "Click to stop"
-                      : voiceCreating || voiceState === "connecting"
-                      ? "Connecting…"
-                      : "Click to speak"
-                  }
-                  aria-label={
-                    voiceState === "listening" ? "Listening — click to stop"
-                      : voiceCreating || voiceState === "connecting" ? "Connecting voice…"
-                      : "Start voice input"
-                  }
-                  className={[
-                    "w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200",
-                    voiceState === "listening"
-                      ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
-                      : voiceCreating || voiceState === "connecting"
-                      ? "bg-muted/60 text-muted-foreground border border-border opacity-60 cursor-wait"
-                      : "bg-muted/60 text-muted-foreground border border-border hover:text-foreground hover:bg-muted",
-                  ].join(" ")}
-                >
-                  {voiceCreating || voiceState === "connecting" ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Mic className="w-3.5 h-3.5" />
-                  )}
-                </button>
+                <VoiceButton
+                  state={voiceCreating ? "connecting" : voiceState}
+                  onStart={() => { speakGreeting(); handleVoiceClick(); }}
+                  onStop={handleVoiceClick}
+                  getAmplitude={getAmplitude}
+                />
                 {/* Send button */}
                 <button
                   type="submit"

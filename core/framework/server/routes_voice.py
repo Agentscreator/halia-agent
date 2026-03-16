@@ -109,6 +109,13 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
             )
         ),
         input_audio_transcription=gtypes.AudioTranscriptionConfig(),
+        realtime_input_config=gtypes.RealtimeInputConfig(
+            automatic_activity_detection=gtypes.AutomaticActivityDetection(
+                # Wait 2s of silence before ending a turn so short pauses don't cut off
+                silence_duration_ms=2000,
+                start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_LOW,
+            ),
+        ),
     )
 
     try:
@@ -132,8 +139,6 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                                     ]
                                 )
                             )
-                        elif data.get("type") == "end_of_turn":
-                            await gemini.send(input="", end_of_turn=True)
                     elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                         break
 
@@ -142,16 +147,18 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                 async for response in gemini.receive():
                     if ws.closed:
                         break
-                    # Send user speech transcript so the frontend can populate the input box
+                    # Only send transcript when the utterance is fully recognised
                     sc = response.server_content
-                    if sc and sc.input_transcription and sc.input_transcription.text:
-                        await ws.send_json(
-                            {
-                                "type": "transcript",
-                                "text": sc.input_transcription.text,
-                                "role": "user",
-                            }
-                        )
+                    if sc and sc.input_transcription:
+                        trans = sc.input_transcription
+                        if trans.text and trans.finished:
+                            await ws.send_json(
+                                {
+                                    "type": "transcript",
+                                    "text": trans.text,
+                                    "role": "user",
+                                }
+                            )
 
             browser_task = asyncio.ensure_future(browser_to_gemini())
             gemini_task = asyncio.ensure_future(gemini_to_browser())

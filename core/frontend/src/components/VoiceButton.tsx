@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Mic, MicOff, Loader2 } from "lucide-react";
 import type { VoiceState } from "@/hooks/use-voice";
 
@@ -6,8 +7,9 @@ interface VoiceButtonProps {
   onStart: () => void;
   onStop: () => void;
   disabled?: boolean;
-  /** When true the session hasn't started yet — show a waiting tooltip. */
   noSession?: boolean;
+  /** Called every animation frame while listening — returns 0–1 amplitude */
+  getAmplitude?: () => number;
 }
 
 const LABELS: Record<VoiceState, string> = {
@@ -17,7 +19,46 @@ const LABELS: Record<VoiceState, string> = {
   error: "Voice error — try again",
 };
 
-export default function VoiceButton({ state, onStart, onStop, disabled, noSession }: VoiceButtonProps) {
+/** Three animated bars that scale with mic amplitude. */
+function AmplitudeBars({ getAmplitude }: { getAmplitude: () => number }) {
+  const barsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    const offsets = [0, 150, 300]; // ms phase offset per bar
+    const start = performance.now();
+
+    const tick = () => {
+      const amp = Math.min(1, getAmplitude() * 3); // boost low signals
+      const t = performance.now() - start;
+      barsRef.current.forEach((bar, i) => {
+        if (!bar) return;
+        // Combine real amplitude with a gentle idle oscillation
+        const idle = 0.3 + 0.2 * Math.sin((t + offsets[i]) / 200);
+        const scale = amp > 0.05 ? 0.4 + amp * 0.6 : idle;
+        bar.style.transform = `scaleY(${scale.toFixed(3)})`;
+      });
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [getAmplitude]);
+
+  return (
+    <span className="flex items-center gap-[2px]">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          ref={(el) => { barsRef.current[i] = el; }}
+          className="inline-block w-[3px] h-[14px] rounded-full bg-red-400 origin-center"
+          style={{ transform: "scaleY(0.4)" }}
+        />
+      ))}
+    </span>
+  );
+}
+
+export default function VoiceButton({ state, onStart, onStop, disabled, noSession, getAmplitude }: VoiceButtonProps) {
   const isActive = state === "listening";
 
   const handleClick = () => {
@@ -33,7 +74,7 @@ export default function VoiceButton({ state, onStart, onStop, disabled, noSessio
       title={noSession ? "Start a conversation to enable voice" : LABELS[state]}
       aria-label={noSession ? "Voice unavailable — start a conversation first" : LABELS[state]}
       className={[
-        "relative p-2 rounded-lg transition-all duration-200",
+        "relative p-2 rounded-lg transition-all duration-200 flex items-center justify-center",
         state === "listening"
           ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
           : state === "error"
@@ -47,6 +88,8 @@ export default function VoiceButton({ state, onStart, onStop, disabled, noSessio
     >
       {state === "connecting" ? (
         <Loader2 className="w-4 h-4 animate-spin" />
+      ) : state === "listening" && getAmplitude ? (
+        <AmplitudeBars getAmplitude={getAmplitude} />
       ) : state === "error" ? (
         <MicOff className="w-4 h-4" />
       ) : (

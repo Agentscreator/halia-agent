@@ -26,6 +26,7 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
   const wsRef = useRef<WebSocket | null>(null);
   const captureCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   // Stable refs so callbacks never go stale
@@ -38,6 +39,9 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     processorRef.current?.disconnect();
     processorRef.current = null;
 
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
 
@@ -46,6 +50,16 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
     wsRef.current?.close();
     wsRef.current = null;
+  }, []);
+
+  /** Returns current mic amplitude 0–1 for visualisation. Call every animation frame. */
+  const getAmplitude = useCallback((): number => {
+    const analyser = analyserRef.current;
+    if (!analyser) return 0;
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(buf);
+    const sum = buf.reduce((s, v) => s + v, 0);
+    return sum / (buf.length * 255);
   }, []);
 
   const start = useCallback(async () => {
@@ -60,7 +74,6 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
       try {
         const msg = JSON.parse(event.data as string) as {
           type: string;
-          data?: string;
           text?: string;
           role?: string;
           message?: string;
@@ -69,6 +82,7 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
         if (msg.type === "ready") {
           setState("listening");
         } else if (msg.type === "transcript" && msg.text) {
+          // Stay in listening state — transcript just populates the input box
           onTranscriptRef.current?.(msg.text, (msg.role as "user" | "assistant") ?? "user");
         } else if (msg.type === "error") {
           onErrorRef.current?.(msg.message ?? "Unknown voice error");
@@ -110,7 +124,12 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
         const source = captureCtx.createMediaStreamSource(stream);
 
-        // ScriptProcessorNode: 512 samples ≈ 32 ms chunks at 16 kHz — deprecated but universally supported
+        // AnalyserNode for amplitude visualisation
+        const analyser = captureCtx.createAnalyser();
+        analyser.fftSize = 256;
+        analyserRef.current = analyser;
+
+        // ScriptProcessorNode: 512 samples ≈ 32 ms chunks at 16 kHz
         const processor: ScriptProcessorNode = captureCtx.createScriptProcessor(512, 1, 1);
         processorRef.current = processor;
 
@@ -120,9 +139,10 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
           ws.send(JSON.stringify({ type: "audio_chunk", data: b64 }));
         };
 
-        // Silent gain node keeps processor alive without mic bleed to speakers
+        // Silent gain keeps processor alive without mic bleed to speakers
         const silentGain = captureCtx.createGain();
         silentGain.gain.value = 0;
+        source.connect(analyser);
         source.connect(processor);
         processor.connect(silentGain);
         silentGain.connect(captureCtx.destination);
@@ -135,10 +155,8 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     };
   }, [state, sessionId, cleanup]);
 
+  /** Stop recording and close the session. */
   const stop = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "end_of_turn" }));
-    }
     cleanup();
     setState("idle");
   }, [cleanup]);
@@ -153,5 +171,5 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
   // Cleanup on unmount
   useEffect(() => () => { cleanup(); }, [cleanup]);
 
-  return { state, start, stop };
+  return { state, start, stop, getAmplitude };
 }
