@@ -111,14 +111,6 @@ export default function Home() {
     onError: handleVoiceError,
   });
 
-  // Clear accumulated transcript when voice starts listening.
-  useEffect(() => {
-    if (voiceState === "listening") {
-      voiceAccumRef.current = "";
-      setInputValue("");
-    }
-  }, [voiceState]);
-
   // Auto-start voice once session is ready
   useEffect(() => {
     if (pendingVoiceStart.current && voiceSessionId && voiceState === "idle") {
@@ -133,6 +125,8 @@ export default function Home() {
       return;
     }
     speakGreeting();
+    voiceAccumRef.current = "";
+    setInputValue("");
     if (voiceSessionId) {
       startVoice();
       return;
