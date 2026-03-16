@@ -105,7 +105,7 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
 
     client = genai.Client(api_key=api_key)
     config = gtypes.LiveConnectConfig(
-        response_modalities=["AUDIO", "TEXT"],
+        response_modalities=["AUDIO"],
         system_instruction=_SYSTEM_PROMPT,
         speech_config=gtypes.SpeechConfig(
             voice_config=gtypes.VoiceConfig(
