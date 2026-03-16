@@ -1,10 +1,9 @@
 import { memo, useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Crown, Cpu, Check, Loader2, Volume2 } from "lucide-react";
+import { Send, Square, Crown, Cpu, Check, Loader2 } from "lucide-react";
 import MarkdownContent from "@/components/MarkdownContent";
 import QuestionWidget from "@/components/QuestionWidget";
 import VoiceButton from "@/components/VoiceButton";
 import { useVoice } from "@/hooks/use-voice";
-import { useTTS } from "@/hooks/use-tts";
 
 export interface ChatMessage {
   id: string;
@@ -243,17 +242,12 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
 
   const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
     setVoiceMessages((prev) => {
-      // Update an in-progress message for this role, or create a new one
       const pending = pendingVoiceMsg.current;
       if (pending && pending.role === role) {
-        // Update existing bubble
-        const updated = prev.map((m) =>
-          m.id === pending.id ? { ...m, content: text } : m
-        );
+        const updated = prev.map((m) => m.id === pending.id ? { ...m, content: text } : m);
         if (isFinal) pendingVoiceMsg.current = null;
         return updated;
       }
-      // New message
       const id = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const msg: ChatMessage = {
         id,
@@ -271,11 +265,12 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
       return [...prev, msg];
     });
 
-    // Also mirror final user speech into the input box
+    // Final user speech → mirror into input box AND auto-submit to hive agent
     if (role === "user" && isFinal) {
       setInput(text);
+      onSend(text, activeThread);
     }
-  }, [activeThread]);
+  }, [activeThread, onSend]);
 
   const handleVoiceError = useCallback((message: string) => {
     console.warn("[Voice]", message);
@@ -283,7 +278,7 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     setTimeout(() => setVoiceError(null), 6000);
   }, []);
 
-  const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude } = useVoice({
+  const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude, injectText } = useVoice({
     sessionId: sessionId ?? "",
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
@@ -298,10 +293,8 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     }
   }, [autoStartVoice, sessionId, voiceState, disabled, startVoice]);
 
-  // --- Voice mode: when active, all assistant text messages are read aloud ---
+  // Voice mode: when active, hive responses are injected into Gemini Live
   const [voiceMode, setVoiceMode] = useState(false);
-  const { speak, cancel: cancelTTS, speaking: ttsSpeaking } = useTTS();
-  // Track which message IDs we've already sent to TTS to avoid duplicates
   const spokenIdsRef = useRef(new Set<string>());
 
   // Enter voice mode automatically when voice becomes active
@@ -316,9 +309,8 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
     if (autoStartVoice) setVoiceMode(true);
   }, [autoStartVoice]);
 
-  // When voice mode is on, speak new assistant messages via TTS.
-  // We watch the messages prop (text pipeline) — voice transcript messages
-  // from the Gemini Live WebSocket already have audio, so skip those.
+  // When voice mode is on, inject hive agent responses into Gemini Live
+  // so Gemini reads them in its own voice (replaces TTS).
   const prevMessageCountRef = useRef(messages.length);
   useEffect(() => {
     if (!voiceMode) {
@@ -326,29 +318,24 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
       return;
     }
 
-    // Only look at messages added since last render
     const newMessages = messages.slice(prevMessageCountRef.current);
     prevMessageCountRef.current = messages.length;
 
     for (const msg of newMessages) {
-      // Only speak assistant/queen/worker messages, not user or system
       if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
       if (!msg.content?.trim()) continue;
-      // Skip if already spoken
       if (spokenIdsRef.current.has(msg.id)) continue;
       spokenIdsRef.current.add(msg.id);
-      speak(msg.content);
+      // Inject into Gemini Live → Gemini reads it aloud and adds "tap or respond" prompt
+      injectText(msg.content);
     }
-  }, [messages, voiceMode, speak]);
+  }, [messages, voiceMode, injectText]);
 
   // Turn off voice mode handler
   const handleVoiceModeOff = useCallback(() => {
     setVoiceMode(false);
-    cancelTTS();
-    if (voiceState === "listening" || voiceState === "speaking") {
-      stopVoice();
-    }
-  }, [cancelTTS, voiceState, stopVoice]);
+    stopVoice();
+  }, [stopVoice]);
 
   // Clear voice messages when switching threads
   useEffect(() => { setVoiceMessages([]); }, [activeThread]);
@@ -470,10 +457,8 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
           {/* Voice mode banner — shows when voice mode is active with option to turn off */}
           {voiceMode && voiceState !== "listening" && voiceState !== "speaking" && !voiceError && (
             <div className="mb-2 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <Volume2 className="w-3 h-3" />
-              <span className="flex-1">
-                {ttsSpeaking ? "Speaking…" : "Voice mode on — responses will be read aloud"}
-              </span>
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="flex-1">Voice mode on — Gemini is listening</span>
               <button
                 type="button"
                 onClick={handleVoiceModeOff}

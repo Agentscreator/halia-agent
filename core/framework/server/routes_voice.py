@@ -12,21 +12,26 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-# Gemini Live model — supports native audio I/O
 _GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
 
 _SYSTEM_PROMPT = (
-    "You are Halia, a voice-first AI assistant powered by Gemini Live. "
-    "You help users interact with the Hive agent system — a multi-agent framework "
-    "that creates and coordinates worker agents to complete tasks. "
-    "Keep responses conversational and concise since they will be spoken aloud. "
+    "You are Halia, the voice interface for Hive — a multi-agent AI system. "
+    "You speak responses aloud and keep them conversational and concise. "
     "Avoid markdown or formatting that doesn't translate to speech. "
-    "When the user describes a task, acknowledge it and let them know the Hive is on it."
+    "\n\n"
+    "When you receive a message starting with [HIVE]:, read it aloud naturally "
+    "as if it is your own response. After reading options or a list, always end with: "
+    "'You can tap an option on screen, or just tell me which one you want.' "
+    "\n\n"
+    "If you could not understand what the user said, say exactly: "
+    "'I didn't catch that — could you say that again, or tap an option on screen?' "
+    "\n\n"
+    "Do not add commentary or opinions — just relay the Hive's messages and guide "
+    "the user through their choice."
 )
 
 
 def _get_api_key(request: web.Request) -> str | None:
-    """Resolve Google API key from credential store or environment."""
     store = request.app.get("credential_store")
     if store is not None:
         try:
@@ -42,7 +47,6 @@ def _get_api_key(request: web.Request) -> str | None:
 
 
 async def _inject_to_queen(session: Any, text: str) -> None:
-    """Inject a user voice input into the queen agent as context."""
     try:
         queen_executor = session.queen_executor
         if queen_executor is None:
@@ -55,19 +59,19 @@ async def _inject_to_queen(session: Any, text: str) -> None:
 
 
 async def handle_voice(request: web.Request) -> web.WebSocketResponse:
-    """WebSocket /api/sessions/{session_id}/voice — full Gemini Live audio proxy.
+    """WebSocket /api/sessions/{session_id}/voice — Gemini Live proxy.
 
-    Protocol (JSON over WebSocket):
-      Client → Server:
-        {"type": "audio_chunk", "data": "<base64 PCM int16 16kHz mono>"}
+    Client → Server message types:
+      {"type": "audio_chunk", "data": "<base64 PCM int16 16kHz mono>"}
+      {"type": "inject_text", "text": "..."}   # hive response → Gemini reads aloud
 
-      Server → Client:
-        {"type": "ready"}
-        {"type": "audio_chunk", "data": "<base64 PCM int16 24kHz mono>"}   # Gemini speaking
-        {"type": "user_transcript",      "text": "...", "finished": bool}  # what user said
-        {"type": "assistant_transcript", "text": "...", "finished": bool}  # what Gemini said
-        {"type": "interrupted"}                                             # user interrupted
-        {"type": "error", "message": "..."}
+    Server → Client message types:
+      {"type": "ready"}
+      {"type": "audio_chunk", "data": "<base64 PCM int16 24kHz mono>"}
+      {"type": "user_transcript",      "text": "...", "finished": bool}
+      {"type": "assistant_transcript", "text": "...", "finished": bool}
+      {"type": "interrupted"}
+      {"type": "error", "message": "..."}
     """
     from framework.server.app import resolve_session
 
@@ -108,12 +112,10 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                 prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(voice_name="Aoede")
             )
         ),
-        # Transcribe both user speech and Gemini's audio output
         input_audio_transcription=gtypes.AudioTranscriptionConfig(),
         output_audio_transcription=gtypes.AudioTranscriptionConfig(),
         realtime_input_config=gtypes.RealtimeInputConfig(
             automatic_activity_detection=gtypes.AutomaticActivityDetection(
-                # Respond quickly; short silence ends the user's turn
                 silence_duration_ms=800,
                 start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_HIGH,
             ),
@@ -124,14 +126,17 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
         async with client.aio.live.connect(model=_GEMINI_LIVE_MODEL, config=config) as gemini:
             await ws.send_json({"type": "ready"})
 
+            # Queue for text injections from the hive so they don't race with audio
+            inject_queue: asyncio.Queue[str] = asyncio.Queue()
+
             async def browser_to_gemini() -> None:
-                """Stream browser mic audio to Gemini Live."""
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         try:
                             data = json.loads(msg.data)
                         except json.JSONDecodeError:
                             continue
+
                         if data.get("type") == "audio_chunk":
                             raw = base64.b64decode(data["data"])
                             await gemini.send(
@@ -141,11 +146,24 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                                     ]
                                 )
                             )
+                        elif data.get("type") == "inject_text" and data.get("text"):
+                            # Hive agent response — tell Gemini to read it aloud
+                            text = data["text"]
+                            await gemini.send(
+                                input=gtypes.LiveClientContent(
+                                    turns=[
+                                        gtypes.Content(
+                                            parts=[gtypes.Part(text=f"[HIVE]: {text}")],
+                                            role="user",
+                                        )
+                                    ],
+                                    turn_complete=True,
+                                )
+                            )
                     elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                         break
 
             async def gemini_to_browser() -> None:
-                """Forward Gemini audio, transcripts, and events to the browser."""
                 async for response in gemini.receive():
                     if ws.closed:
                         break
@@ -154,18 +172,15 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                     if not sc:
                         continue
 
-                    # Gemini speaking — send raw PCM audio to browser for playback
                     if response.data:
                         await ws.send_json({
                             "type": "audio_chunk",
                             "data": base64.b64encode(response.data).decode(),
                         })
 
-                    # User interrupted Gemini — browser should clear its audio queue
                     if sc.interrupted:
                         await ws.send_json({"type": "interrupted"})
 
-                    # What the user said (input transcription)
                     if sc.input_transcription and sc.input_transcription.text:
                         trans = sc.input_transcription
                         await ws.send_json({
@@ -173,11 +188,9 @@ async def handle_voice(request: web.Request) -> web.WebSocketResponse:
                             "text": trans.text,
                             "finished": bool(trans.finished),
                         })
-                        # Inject final user utterances into the hive agent pipeline
                         if trans.finished:
                             await _inject_to_queen(session, trans.text)
 
-                    # What Gemini said (output transcription)
                     if sc.output_transcription and sc.output_transcription.text:
                         trans = sc.output_transcription
                         await ws.send_json({

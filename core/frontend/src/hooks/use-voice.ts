@@ -4,12 +4,10 @@ export type VoiceState = "idle" | "connecting" | "listening" | "speaking" | "err
 
 interface UseVoiceOptions {
   sessionId: string;
-  /** Called when a transcript arrives. isFinal=false means interim/partial. */
   onTranscript?: (text: string, role: "user" | "assistant", isFinal: boolean) => void;
   onError?: (message: string) => void;
 }
 
-/** Convert Float32Array PCM to base64 int16 PCM. */
 function float32ToInt16Base64(samples: Float32Array): string {
   const int16 = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
@@ -21,7 +19,6 @@ function float32ToInt16Base64(samples: Float32Array): string {
   return btoa(bin);
 }
 
-/** Decode base64 int16 PCM into a Web Audio AudioBuffer. */
 function decodeAudioChunk(b64: string, ctx: AudioContext): AudioBuffer | null {
   try {
     const bin = atob(b64);
@@ -40,31 +37,36 @@ function decodeAudioChunk(b64: string, ctx: AudioContext): AudioBuffer | null {
 
 export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) {
   const [state, setState] = useState<VoiceState>("idle");
+  // Use a ref so callbacks always see the latest state without re-creating closures
+  const stateRef = useRef<VoiceState>("idle");
 
   const wsRef = useRef<WebSocket | null>(null);
-
-  // Capture (mic → Gemini)
   const captureCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-
-  // Playback (Gemini → speaker)
   const playbackCtxRef = useRef<AudioContext | null>(null);
   const nextPlayAtRef = useRef(0);
   const playbackSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+
+  // When true, ws.onclose will attempt reconnect instead of going idle
+  const shouldReconnectRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
-  /** Clear the playback queue — called when Gemini is interrupted. */
+  const setStateBoth = useCallback((s: VoiceState) => {
+    stateRef.current = s;
+    setState(s);
+  }, []);
+
   const clearPlayback = useCallback(() => {
-    playbackSourcesRef.current.forEach((s) => { try { s.stop(); } catch { /* already ended */ } });
+    playbackSourcesRef.current.forEach((s) => { try { s.stop(); } catch { /* ended */ } });
     playbackSourcesRef.current = [];
     nextPlayAtRef.current = 0;
-    // Close and recreate context so scheduled nodes are discarded immediately
     if (playbackCtxRef.current && playbackCtxRef.current.state !== "closed") {
       playbackCtxRef.current.close().catch(() => {});
       playbackCtxRef.current = null;
@@ -86,8 +88,8 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     source.onended = () => {
       playbackSourcesRef.current = playbackSourcesRef.current.filter((s) => s !== source);
       if (playbackSourcesRef.current.length === 0) {
-        // All audio drained — back to listening
         setState((s) => (s === "speaking" ? "listening" : s));
+        stateRef.current = stateRef.current === "speaking" ? "listening" : stateRef.current;
       }
     };
 
@@ -95,12 +97,13 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     const startAt = Math.max(now, nextPlayAtRef.current);
     source.start(startAt);
     nextPlayAtRef.current = startAt + buf.duration;
-    setState("speaking");
-  }, []);
+    setStateBoth("speaking");
+  }, [setStateBoth]);
 
-  const cleanup = useCallback(() => {
-    clearPlayback();
+  // Forward reference so connect() can reference itself for reconnect
+  const connectRef = useRef<(() => void) | null>(null);
 
+  const cleanupConnection = useCallback(() => {
     processorRef.current?.disconnect();
     processorRef.current = null;
     analyserRef.current?.disconnect();
@@ -109,12 +112,12 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     streamRef.current = null;
     captureCtxRef.current?.close().catch(() => {});
     captureCtxRef.current = null;
-
+    clearPlayback();
     wsRef.current?.close();
     wsRef.current = null;
   }, [clearPlayback]);
 
-  /** Returns mic amplitude 0–1 for the visualiser. */
+  /** Returns mic amplitude 0–1. */
   const getAmplitude = useCallback((): number => {
     const a = analyserRef.current;
     if (!a) return 0;
@@ -123,9 +126,9 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
     return buf.reduce((s, v) => s + v, 0) / (buf.length * 255);
   }, []);
 
-  const start = useCallback(async () => {
-    if (state !== "idle") return;
-    setState("connecting");
+  const connect = useCallback(() => {
+    if (!sessionId) return;
+    setStateBoth("connecting");
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/api/sessions/${sessionId}/voice`);
@@ -142,44 +145,49 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
         };
 
         if (msg.type === "ready") {
-          setState("listening");
-
+          setStateBoth("listening");
         } else if (msg.type === "audio_chunk" && msg.data) {
-          // Gemini is speaking — play it back
           playAudioChunk(msg.data);
-
         } else if (msg.type === "interrupted") {
-          // User interrupted Gemini — clear queued audio immediately
           clearPlayback();
-          setState("listening");
-
+          setStateBoth("listening");
         } else if (msg.type === "user_transcript" && msg.text) {
           onTranscriptRef.current?.(msg.text, "user", msg.finished ?? false);
-
         } else if (msg.type === "assistant_transcript" && msg.text) {
           onTranscriptRef.current?.(msg.text, "assistant", msg.finished ?? false);
-
         } else if (msg.type === "error") {
           onErrorRef.current?.(msg.message ?? "Unknown voice error");
-          cleanup();
-          setState("error");
+          shouldReconnectRef.current = false;
+          cleanupConnection();
+          setStateBoth("error");
         }
-      } catch { /* ignore malformed frames */ }
+      } catch { /* ignore malformed */ }
     };
 
-    ws.onclose = () => { cleanup(); setState("idle"); };
-    ws.onerror = () => { onErrorRef.current?.("Voice connection failed"); cleanup(); setState("error"); };
+    ws.onclose = () => {
+      cleanupConnection();
+      if (shouldReconnectRef.current && sessionId) {
+        // Session closed unexpectedly — reconnect after a brief pause
+        setStateBoth("connecting");
+        reconnectTimerRef.current = setTimeout(() => {
+          if (shouldReconnectRef.current) connectRef.current?.();
+        }, 1500);
+      } else {
+        setStateBoth("idle");
+      }
+    };
+
+    ws.onerror = () => {
+      onErrorRef.current?.("Voice connection failed");
+      shouldReconnectRef.current = false;
+      cleanupConnection();
+      setStateBoth("error");
+    };
 
     ws.onopen = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
         streamRef.current = stream;
 
@@ -188,19 +196,16 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
 
         const source = captureCtx.createMediaStreamSource(stream);
 
-        // Analyser for amplitude visualisation
         const analyser = captureCtx.createAnalyser();
         analyser.fftSize = 256;
         analyserRef.current = analyser;
         source.connect(analyser);
 
-        // ScriptProcessor sends PCM chunks to Gemini
         const processor = captureCtx.createScriptProcessor(512, 1, 1);
         processorRef.current = processor;
         processor.onaudioprocess = (e) => {
           if (ws.readyState !== WebSocket.OPEN) return;
-          const b64 = float32ToInt16Base64(e.inputBuffer.getChannelData(0));
-          ws.send(JSON.stringify({ type: "audio_chunk", data: b64 }));
+          ws.send(JSON.stringify({ type: "audio_chunk", data: float32ToInt16Base64(e.inputBuffer.getChannelData(0)) }));
         };
 
         const silentGain = captureCtx.createGain();
@@ -209,26 +214,51 @@ export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) 
         processor.connect(silentGain);
         silentGain.connect(captureCtx.destination);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Microphone access denied";
-        onErrorRef.current?.(message);
+        onErrorRef.current?.(err instanceof Error ? err.message : "Microphone access denied");
+        shouldReconnectRef.current = false;
         ws.close();
-        setState("error");
+        setStateBoth("error");
       }
     };
-  }, [state, sessionId, cleanup, playAudioChunk, clearPlayback]);
+  }, [sessionId, setStateBoth, playAudioChunk, clearPlayback, cleanupConnection]);
+
+  // Keep connectRef current
+  useEffect(() => { connectRef.current = connect; }, [connect]);
+
+  const start = useCallback(() => {
+    if (stateRef.current !== "idle") return;
+    shouldReconnectRef.current = true;
+    connect();
+  }, [connect]);
 
   const stop = useCallback(() => {
-    cleanup();
-    setState("idle");
-  }, [cleanup]);
+    shouldReconnectRef.current = false;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    cleanupConnection();
+    setStateBoth("idle");
+  }, [cleanupConnection, setStateBoth]);
+
+  /** Send a hive agent text response into Gemini Live so it reads it aloud. */
+  const injectText = useCallback((text: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "inject_text", text }));
+    }
+  }, []);
 
   useEffect(() => {
     if (state !== "error") return;
-    const t = setTimeout(() => setState("idle"), 3000);
+    const t = setTimeout(() => setStateBoth("idle"), 3000);
     return () => clearTimeout(t);
-  }, [state]);
+  }, [state, setStateBoth]);
 
-  useEffect(() => () => { cleanup(); }, [cleanup]);
+  useEffect(() => () => {
+    shouldReconnectRef.current = false;
+    cleanupConnection();
+  }, [cleanupConnection]);
 
-  return { state, start, stop, getAmplitude };
+  return { state, start, stop, getAmplitude, injectText };
 }
