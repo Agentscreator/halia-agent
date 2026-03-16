@@ -238,11 +238,11 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Voice integration — only active when a sessionId is provided
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal?: boolean) => {
     if (role === "user") {
-      // Populate the input box so the user can review/edit before sending
+      // Show interim text live as user speaks; focus on final
       setInput(text);
-      setTimeout(() => textareaRef.current?.focus(), 50);
+      if (isFinal) setTimeout(() => textareaRef.current?.focus(), 50);
     }
   }, []);
 

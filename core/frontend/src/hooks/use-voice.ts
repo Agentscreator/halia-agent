@@ -3,172 +3,132 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export type VoiceState = "idle" | "connecting" | "listening" | "error";
 
 interface UseVoiceOptions {
-  sessionId: string;
-  onTranscript?: (text: string, role: "user" | "assistant") => void;
+  sessionId?: string; // unused — STT runs in browser via Web Speech API
+  onTranscript?: (text: string, role: "user" | "assistant", isFinal?: boolean) => void;
   onError?: (message: string) => void;
 }
 
-/** Convert Float32Array PCM samples to base64-encoded int16 PCM. */
-function float32ToInt16Base64(samples: Float32Array): string {
-  const int16 = new Int16Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    int16[i] = Math.max(-32768, Math.min(32767, samples[i] * 32768));
-  }
-  const bytes = new Uint8Array(int16.buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
-
-export function useVoice({ sessionId, onTranscript, onError }: UseVoiceOptions) {
+export function useVoice({ onTranscript, onError }: UseVoiceOptions) {
   const [state, setState] = useState<VoiceState>("idle");
-
-  const wsRef = useRef<WebSocket | null>(null);
-  const captureCtxRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const stateRef = useRef<VoiceState>("idle");
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Stable refs so callbacks never go stale
   const onTranscriptRef = useRef(onTranscript);
   const onErrorRef = useRef(onError);
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
-  const cleanup = useCallback(() => {
-    processorRef.current?.disconnect();
-    processorRef.current = null;
+  const setStateBoth = useCallback((s: VoiceState) => {
+    stateRef.current = s;
+    setState(s);
+  }, []);
 
-    analyserRef.current?.disconnect();
-    analyserRef.current = null;
+  const cleanup = useCallback(() => {
+    recognitionRef.current?.abort();
+    recognitionRef.current = null;
 
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
 
-    captureCtxRef.current?.close().catch(() => {});
-    captureCtxRef.current = null;
-
-    wsRef.current?.close();
-    wsRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    analyserRef.current = null;
   }, []);
 
-  /** Returns current mic amplitude 0–1 for visualisation. Call every animation frame. */
+  /** Returns mic amplitude 0–1. Call every animation frame. */
   const getAmplitude = useCallback((): number => {
     const analyser = analyserRef.current;
     if (!analyser) return 0;
     const buf = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(buf);
-    const sum = buf.reduce((s, v) => s + v, 0);
-    return sum / (buf.length * 255);
+    return buf.reduce((s, v) => s + v, 0) / (buf.length * 255);
   }, []);
 
   const start = useCallback(async () => {
-    if (state !== "idle") return;
-    setState("connecting");
+    if (stateRef.current !== "idle") return;
+    setStateBoth("connecting");
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/sessions/${sessionId}/voice`);
-    wsRef.current = ws;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      onErrorRef.current?.("Speech recognition not supported — use Chrome or Edge.");
+      setStateBoth("error");
+      return;
+    }
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data as string) as {
-          type: string;
-          text?: string;
-          role?: string;
-          message?: string;
-        };
+    // Grab mic stream for amplitude visualisation (separate from STT)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const ctx = new AudioContext();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+      source.connect(analyser);
+    } catch {
+      // amplitude bars won't work but STT will still run
+    }
 
-        if (msg.type === "ready") {
-          setState("listening");
-        } else if (msg.type === "transcript" && msg.text) {
-          // Stay in listening state — transcript just populates the input box
-          onTranscriptRef.current?.(msg.text, (msg.role as "user" | "assistant") ?? "user");
-        } else if (msg.type === "error") {
-          onErrorRef.current?.(msg.message ?? "Unknown voice error");
-          cleanup();
-          setState("error");
-        }
-      } catch {
-        // ignore malformed frames
+    const recognition: SpeechRecognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => {
+      setStateBoth("listening");
+    };
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let finalText = "";
+      let interimText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) finalText += t;
+        else interimText += t;
+      }
+      if (finalText) {
+        onTranscriptRef.current?.(finalText.trim(), "user", true);
+      } else if (interimText) {
+        onTranscriptRef.current?.(interimText.trim(), "user", false);
       }
     };
 
-    ws.onclose = () => {
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      // no-speech and aborted are expected — just keep going
+      if (event.error === "no-speech" || event.error === "aborted") return;
+      onErrorRef.current?.(`Voice error: ${event.error}`);
+      setStateBoth("error");
       cleanup();
-      setState("idle");
     };
 
-    ws.onerror = () => {
-      onErrorRef.current?.("Voice connection failed");
-      cleanup();
-      setState("error");
-    };
-
-    ws.onopen = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 16000,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        streamRef.current = stream;
-
-        // AudioContext at 16 kHz — what Gemini Live expects
-        const captureCtx = new AudioContext({ sampleRate: 16000 });
-        captureCtxRef.current = captureCtx;
-
-        const source = captureCtx.createMediaStreamSource(stream);
-
-        // AnalyserNode for amplitude visualisation
-        const analyser = captureCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyserRef.current = analyser;
-
-        // ScriptProcessorNode: 512 samples ≈ 32 ms chunks at 16 kHz
-        const processor: ScriptProcessorNode = captureCtx.createScriptProcessor(512, 1, 1);
-        processorRef.current = processor;
-
-        processor.onaudioprocess = (e) => {
-          if (ws.readyState !== WebSocket.OPEN) return;
-          const b64 = float32ToInt16Base64(e.inputBuffer.getChannelData(0));
-          ws.send(JSON.stringify({ type: "audio_chunk", data: b64 }));
-        };
-
-        // Silent gain keeps processor alive without mic bleed to speakers
-        const silentGain = captureCtx.createGain();
-        silentGain.gain.value = 0;
-        source.connect(analyser);
-        source.connect(processor);
-        processor.connect(silentGain);
-        silentGain.connect(captureCtx.destination);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Microphone access denied";
-        onErrorRef.current?.(message);
-        ws.close();
-        setState("error");
+    recognition.onend = () => {
+      // Browser stops after silence — restart to keep always-on
+      if (stateRef.current === "listening") {
+        try { recognition.start(); } catch { /* already started */ }
       }
     };
-  }, [state, sessionId, cleanup]);
 
-  /** Stop recording and close the session. */
+    recognition.start();
+  }, [cleanup, setStateBoth]);
+
   const stop = useCallback(() => {
+    setStateBoth("idle");
     cleanup();
-    setState("idle");
-  }, [cleanup]);
+  }, [cleanup, setStateBoth]);
 
-  // Auto-clear error state after 3 s so the button becomes clickable again
+  // Auto-clear error after 3 s
   useEffect(() => {
     if (state !== "error") return;
-    const t = setTimeout(() => setState("idle"), 3000);
+    const t = setTimeout(() => setStateBoth("idle"), 3000);
     return () => clearTimeout(t);
-  }, [state]);
+  }, [state, setStateBoth]);
 
-  // Cleanup on unmount
   useEffect(() => () => { cleanup(); }, [cleanup]);
 
   return { state, start, stop, getAmplitude };

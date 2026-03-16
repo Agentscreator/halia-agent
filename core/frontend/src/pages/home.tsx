@@ -7,7 +7,7 @@ import { useVoice } from "@/hooks/use-voice";
 import { useTTS } from "@/hooks/use-tts";
 import type { LucideIcon } from "lucide-react";
 import { agentsApi } from "@/api/agents";
-import { sessionsApi } from "@/api/sessions";
+
 import type { DiscoverEntry } from "@/api/types";
 
 // --- Icon and color maps (backend can't serve icons) ---
@@ -72,18 +72,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Voice: create a session on-demand so the mic works from the home page
-  const [voiceSessionId, setVoiceSessionId] = useState<string | null>(null);
-  const [voiceCreating, setVoiceCreating] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  // Track whether we should auto-start voice after session creation
-  const pendingVoiceStart = useRef(false);
 
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant") => {
-    // Populate the input box so the user can review/edit before sending
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal?: boolean) => {
     if (role === "user") {
       setInputValue(text);
-      setTimeout(() => textareaRef.current?.focus(), 50);
+      if (isFinal) setTimeout(() => textareaRef.current?.focus(), 50);
     }
   }, []);
 
@@ -94,45 +88,18 @@ export default function Home() {
   }, []);
 
   const { state: voiceState, start: startVoice, stop: stopVoice, getAmplitude } = useVoice({
-    sessionId: voiceSessionId ?? "",
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
   });
 
-  // Auto-start voice once the session is created
-  useEffect(() => {
-    if (pendingVoiceStart.current && voiceSessionId && voiceState === "idle") {
-      pendingVoiceStart.current = false;
-      startVoice();
-    }
-  }, [voiceSessionId, voiceState, startVoice]);
-
-  const handleVoiceClick = useCallback(async () => {
-    // If already active, stop
+  const handleVoiceClick = useCallback(() => {
     if (voiceState === "listening") {
       stopVoice();
-      return;
-    }
-
-    // If session already exists, just start
-    if (voiceSessionId) {
+    } else if (voiceState === "idle") {
+      speakGreeting();
       startVoice();
-      return;
     }
-
-    // Create a session first, then start voice
-    setVoiceCreating(true);
-    try {
-      const session = await sessionsApi.create();
-      setVoiceSessionId(session.session_id);
-      pendingVoiceStart.current = true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to start voice session";
-      setVoiceError(msg);
-    } finally {
-      setVoiceCreating(false);
-    }
-  }, [voiceState, voiceSessionId, startVoice, stopVoice]);
+  }, [voiceState, startVoice, stopVoice, speakGreeting]);
 
   // Fetch agents on mount so data is ready when user toggles
   useEffect(() => {
@@ -237,8 +204,8 @@ export default function Home() {
               />
               <div className="absolute right-3 bottom-2.5 flex items-center gap-1.5">
                 <VoiceButton
-                  state={voiceCreating ? "connecting" : voiceState}
-                  onStart={() => { speakGreeting(); handleVoiceClick(); }}
+                  state={voiceState}
+                  onStart={handleVoiceClick}
                   onStop={handleVoiceClick}
                   getAmplitude={getAmplitude}
                 />
