@@ -4,6 +4,7 @@ import MarkdownContent from "@/components/MarkdownContent";
 import QuestionWidget from "@/components/QuestionWidget";
 import VoiceButton from "@/components/VoiceButton";
 import { useVoice } from "@/hooks/use-voice";
+import { useTTS } from "@/hooks/use-tts";
 
 export interface ChatMessage {
   id: string;
@@ -231,6 +232,42 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const [input, setInput] = useState("");
   const [readMap, setReadMap] = useState<Record<string, number>>({});
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
+
+  // Auto-read agent responses aloud via Gemini TTS.
+  // Collects message IDs that arrived while the agent was busy (streaming),
+  // then speaks them once isBusy goes false (stream complete).
+  const { speak } = useTTS();
+  const ttsSpokenIds = useRef(new Set<string>());
+  const ttsPendingIds = useRef(new Set<string>());
+
+  // Collect newly arrived agent/queen messages while streaming is in progress.
+  useEffect(() => {
+    for (const msg of messages) {
+      if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
+      if (!msg.content?.trim()) continue;
+      if (ttsSpokenIds.current.has(msg.id)) continue;
+      ttsPendingIds.current.add(msg.id);
+    }
+  }, [messages]);
+
+  // When streaming finishes, speak everything that's pending.
+  const prevIsBusy = useRef(isBusy);
+  useEffect(() => {
+    const wasbusy = prevIsBusy.current;
+    prevIsBusy.current = isBusy;
+    if (wasbusy && !isBusy && ttsPendingIds.current.size > 0) {
+      // Build a lookup by id for the latest content.
+      const byId = new Map(messages.map((m) => [m.id, m]));
+      for (const id of ttsPendingIds.current) {
+        const msg = byId.get(id);
+        if (msg?.content?.trim()) {
+          ttsSpokenIds.current.add(id);
+          speak(msg.content);
+        }
+      }
+      ttsPendingIds.current.clear();
+    }
+  }, [isBusy, messages, speak]);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
