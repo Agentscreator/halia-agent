@@ -234,45 +234,40 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
 
   // Auto-read agent/queen messages aloud via Gemini TTS.
-  // Uses a debounce per message: when a message's content stops changing for
-  // 800 ms it is considered done streaming and is spoken. This fires each
-  // message independently — the queen doesn't have to finish all her tool
-  // calls before the first response is read aloud.
+  // Strategy: accumulate pending queen message IDs as they stream in, then
+  // speak them when isWaiting transitions false→true (= each LLM turn just
+  // finished streaming, signalled by the node_loop_iteration SSE event).
   const { speak } = useTTS();
   const ttsSpokenIds = useRef(new Set<string>());
-  const ttsDebounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const ttsLastContent = useRef<Record<string, string>>({});
+  const ttsPendingIds = useRef(new Set<string>());
+  const prevIsWaiting = useRef(isWaiting);
 
+  // Track which message IDs are candidates for TTS as they stream in.
   useEffect(() => {
     for (const msg of messages) {
       if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
       if (!msg.content?.trim()) continue;
       if (ttsSpokenIds.current.has(msg.id)) continue;
-
-      const prev = ttsLastContent.current[msg.id];
-      ttsLastContent.current[msg.id] = msg.content;
-
-      if (msg.content !== prev) {
-        // Content changed — reset the debounce timer for this message.
-        clearTimeout(ttsDebounceTimers.current[msg.id]);
-        const id = msg.id;
-        const content = msg.content;
-        ttsDebounceTimers.current[id] = setTimeout(() => {
-          delete ttsDebounceTimers.current[id];
-          delete ttsLastContent.current[id];
-          if (!ttsSpokenIds.current.has(id)) {
-            ttsSpokenIds.current.add(id);
-            speak(content);
-          }
-        }, 800);
-      }
+      ttsPendingIds.current.add(msg.id);
     }
-  }, [messages, speak]);
+  }, [messages]);
 
-  // Clean up debounce timers on unmount.
-  useEffect(() => () => {
-    Object.values(ttsDebounceTimers.current).forEach(clearTimeout);
-  }, []);
+  // When isWaiting goes false→true the current LLM turn is done — speak pending messages.
+  useEffect(() => {
+    const wasWaiting = prevIsWaiting.current;
+    prevIsWaiting.current = isWaiting;
+    if (!wasWaiting && isWaiting && ttsPendingIds.current.size > 0) {
+      const byId = new Map(messages.map((m) => [m.id, m]));
+      for (const id of ttsPendingIds.current) {
+        const msg = byId.get(id);
+        if (msg?.content?.trim() && !ttsSpokenIds.current.has(id)) {
+          ttsSpokenIds.current.add(id);
+          speak(msg.content);
+        }
+      }
+      ttsPendingIds.current.clear();
+    }
+  }, [isWaiting, messages, speak]);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);

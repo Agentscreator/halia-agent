@@ -663,10 +663,10 @@ export default function Workspace() {
             }
           }
 
-          // Suppress the queen's intro cycle whenever we are about to restore a
-          // previous conversation, or whenever we have a stored session ID.
-          const willRestore = !!(restoreFrom);
-          if (willRestore || preRestoredMsgs.length > 0) suppressIntroRef.current.add(agentType);
+          // Only suppress the queen's intro when there are actual prior messages
+          // to restore — if we have a stored session ID but no messages on disk,
+          // the queen should run normally so its response is visible.
+          if (preRestoredMsgs.length > 0) suppressIntroRef.current.add(agentType);
 
           // Pass coldRestoreId as queenResumeFrom so the backend writes queen
           // messages into the ORIGINAL session's directory.
