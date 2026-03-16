@@ -233,41 +233,46 @@ export default function ChatPanel({ messages, onSend, isWaiting, isWorkerWaiting
   const [readMap, setReadMap] = useState<Record<string, number>>({});
   const [voiceMessages, setVoiceMessages] = useState<ChatMessage[]>([]);
 
-  // Auto-read agent responses aloud via Gemini TTS.
-  // Collects message IDs that arrived while the agent was busy (streaming),
-  // then speaks them once isBusy goes false (stream complete).
+  // Auto-read agent/queen messages aloud via Gemini TTS.
+  // Uses a debounce per message: when a message's content stops changing for
+  // 800 ms it is considered done streaming and is spoken. This fires each
+  // message independently — the queen doesn't have to finish all her tool
+  // calls before the first response is read aloud.
   const { speak } = useTTS();
   const ttsSpokenIds = useRef(new Set<string>());
-  const ttsPendingIds = useRef(new Set<string>());
+  const ttsDebounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const ttsLastContent = useRef<Record<string, string>>({});
 
-  // Collect newly arrived agent/queen messages while streaming is in progress.
   useEffect(() => {
     for (const msg of messages) {
       if (msg.type === "user" || msg.type === "system" || msg.type === "tool_status") continue;
       if (!msg.content?.trim()) continue;
       if (ttsSpokenIds.current.has(msg.id)) continue;
-      ttsPendingIds.current.add(msg.id);
-    }
-  }, [messages]);
 
-  // When streaming finishes, speak everything that's pending.
-  const prevIsBusy = useRef(isBusy);
-  useEffect(() => {
-    const wasbusy = prevIsBusy.current;
-    prevIsBusy.current = isBusy;
-    if (wasbusy && !isBusy && ttsPendingIds.current.size > 0) {
-      // Build a lookup by id for the latest content.
-      const byId = new Map(messages.map((m) => [m.id, m]));
-      for (const id of ttsPendingIds.current) {
-        const msg = byId.get(id);
-        if (msg?.content?.trim()) {
-          ttsSpokenIds.current.add(id);
-          speak(msg.content);
-        }
+      const prev = ttsLastContent.current[msg.id];
+      ttsLastContent.current[msg.id] = msg.content;
+
+      if (msg.content !== prev) {
+        // Content changed — reset the debounce timer for this message.
+        clearTimeout(ttsDebounceTimers.current[msg.id]);
+        const id = msg.id;
+        const content = msg.content;
+        ttsDebounceTimers.current[id] = setTimeout(() => {
+          delete ttsDebounceTimers.current[id];
+          delete ttsLastContent.current[id];
+          if (!ttsSpokenIds.current.has(id)) {
+            ttsSpokenIds.current.add(id);
+            speak(content);
+          }
+        }, 800);
       }
-      ttsPendingIds.current.clear();
     }
-  }, [isBusy, messages, speak]);
+  }, [messages, speak]);
+
+  // Clean up debounce timers on unmount.
+  useEffect(() => () => {
+    Object.values(ttsDebounceTimers.current).forEach(clearTimeout);
+  }, []);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
