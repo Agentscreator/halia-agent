@@ -130,12 +130,24 @@ export default function Home() {
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const pendingVoiceStart = useRef(false);
 
-  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", _isFinal: boolean) => {
-    // Show all user transcripts (interim + final) so speech appears in the box live.
-    // User can edit then press Enter to submit.
+  // Accumulates interim transcript deltas within a single utterance.
+  // Gemini sends incremental chunks ("build", "an", "agent") not cumulative text,
+  // so we concatenate them ourselves and reset when finished=true.
+  const voiceAccumRef = useRef("");
+
+  const handleVoiceTranscript = useCallback((text: string, role: "user" | "assistant", isFinal: boolean) => {
     if (role === "user" && text.trim()) {
       stopTypewriter();
-      setInputValue(text);
+      if (isFinal) {
+        // Gemini's final message contains the complete utterance text.
+        voiceAccumRef.current = "";
+        setInputValue(text);
+      } else {
+        // Interim: delta chunk — accumulate with a space separator.
+        const sep = voiceAccumRef.current && !voiceAccumRef.current.endsWith(" ") ? " " : "";
+        voiceAccumRef.current += sep + text;
+        setInputValue(voiceAccumRef.current);
+      }
       textareaRef.current?.focus();
     }
   }, [stopTypewriter]);
@@ -151,6 +163,15 @@ export default function Home() {
     onTranscript: handleVoiceTranscript,
     onError: handleVoiceError,
   });
+
+  // Stop typewriter and clear accumulated transcript when voice starts listening.
+  useEffect(() => {
+    if (voiceState === "listening") {
+      stopTypewriter();
+      voiceAccumRef.current = "";
+      setInputValue("");
+    }
+  }, [voiceState, stopTypewriter]);
 
   // Auto-start voice once session is ready
   useEffect(() => {
