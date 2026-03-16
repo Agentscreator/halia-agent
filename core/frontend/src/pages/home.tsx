@@ -84,11 +84,11 @@ export default function Home() {
         voiceAccumRef.current = "";
         setInputValue(voiceCommittedRef.current);
       } else {
-        // Interim delta — append to current accumulation and show over committed base.
-        const sep = voiceAccumRef.current && !voiceAccumRef.current.endsWith(" ") ? " " : "";
-        voiceAccumRef.current += sep + text;
+        // Interim delta — concatenate directly; Gemini includes its own spacing.
+        // Adding separators between sub-word chunks like "cre"+"ate" produces "cre ate".
+        voiceAccumRef.current += text;
         const base = voiceCommittedRef.current;
-        const sep2 = base && !base.endsWith(" ") ? " " : "";
+        const sep2 = base && !base.endsWith(" ") && !voiceAccumRef.current.startsWith(" ") ? " " : "";
         setInputValue((base + sep2 + voiceAccumRef.current).trim());
       }
       textareaRef.current?.focus();
